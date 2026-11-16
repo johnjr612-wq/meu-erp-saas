@@ -35,3 +35,14 @@ Em **Configurações**, OWNER/ADMIN convidam por e-mail. O link `/convite/<token
 (ex.: enviar por WhatsApp) e, se `RESEND_API_KEY` e `EMAIL_FROM` estiverem configurados, também vai por e-mail.
 OWNER concede ADMIN/FINANCIAL/OPERATOR; ADMIN concede FINANCIAL/OPERATOR. Convites pendentes contam no limite
 de usuários do plano. Defina `APP_URL` em produção para que o link use o domínio correto.
+
+## Assinatura (Asaas)
+
+Em **Configurações › Assinatura** o proprietário escolhe o plano e informa o CPF/CNPJ do pagador. O sistema cria o
+cliente e uma assinatura mensal no Asaas e abre a fatura, onde o cliente paga com Pix, boleto ou cartão. O plano só
+muda quando o webhook confirma o pagamento. Ao cancelar, o plano pago vale até o fim do período já pago.
+
+Configuração:
+1. `ASAAS_API_KEY` (sandbox ou produção) e `ASAAS_API_URL` (`https://api-sandbox.asaas.com/v3` ou `https://api.asaas.com/v3`).
+2. No painel do Asaas, crie um webhook para `https://SEU_DOMINIO/api/webhooks/asaas` com os eventos de cobrança e
+   assinatura, e defina um token igual a `ASAAS_WEBHOOK_TOKEN`.

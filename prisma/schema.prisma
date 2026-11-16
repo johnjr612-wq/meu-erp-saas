@@ -113,6 +113,8 @@ model Organization {
   slug                String             @unique
   document            String? // CNPJ
   plan                Plan               @default(FREE)
+  /// Plano contratado aguardando o primeiro pagamento confirmado.
+  pendingPlan         Plan?
   subscriptionStatus  SubscriptionStatus @default(TRIALING)
   asaasCustomerId     String?            @unique
   asaasSubscriptionId String?            @unique

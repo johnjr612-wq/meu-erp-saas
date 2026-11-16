@@ -97,10 +97,11 @@ export function FormField({
   ...inputProps
 }: { name: string; label: string; children?: ReactNode } & React.ComponentProps<"input">) {
   const errors = useContext(FieldErrorsContext)[name];
+  const inputId = inputProps.id ?? name;
   return (
     <div className="grid gap-1.5">
-      <Label htmlFor={name}>{label}</Label>
-      {children ?? <Input id={name} name={name} aria-invalid={!!errors} {...inputProps} />}
+      <Label htmlFor={inputId}>{label}</Label>
+      {children ?? <Input name={name} aria-invalid={!!errors} {...inputProps} id={inputId} />}
       {errors?.map((e) => (
         <p key={e} className="text-xs text-destructive">
           {e}
