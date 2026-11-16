@@ -17,7 +17,8 @@ import { DomainError } from "@/lib/errors";
 import { parseBRLToCents } from "@/lib/money";
 import { completeProductionOrder, createFormula, createProductionOrder, registerStockMovement } from "@/modules/inventory/service";
 import { confirmSalesOrder, createSalesOrder } from "@/modules/sales/service";
-import { cancelEntry, createEntry, getBankBalances, reversePayment, settleEntry } from "@/modules/financial/service";
+import { cancelEntry, createEntry, getBankBalances, reversePayment, settleEntry, updateEntry } from "@/modules/financial/service";
+import { deleteCustomer, deleteProduct, deleteSupplier, updateCustomer, updateProduct } from "@/modules/registry/service";
 import {
   acceptInvitation,
   changeMemberRole,
@@ -215,6 +216,82 @@ async function main() {
     assert.equal(raw.deletedBy, A.userId);
     const logs = await dbA.auditLog.findMany({ where: { entityId: entry.id } });
     assert.deepEqual(logs.map((l) => l.action).sort(), ["CREATE", "SOFT_DELETE"]);
+  });
+
+  // ---- Edição e exclusão ----
+  const productInput = (p: { id: string; sku: string; name: string; type: "RAW_MATERIAL" | "PACKAGING" | "FINISHED_GOOD"; unit: "UN" | "KG" | "G" | "L" | "ML" | "CX" }) => ({
+    id: p.id, sku: p.sku, name: p.name, type: p.type, unit: p.unit, priceCents: 0, minStock: "0",
+  });
+
+  await step("edição: produto valida SKU duplicado, unidade com movimento e tipo em fórmula", async () => {
+    await assert.rejects(updateProduct(dbA, A, { ...productInput(tensoativo), sku: "AGUA" }), /SKU AGUA já está em uso/);
+    await assert.rejects(updateProduct(dbA, A, { ...productInput(tensoativo), unit: "L" }), /unidade não pode mudar/);
+    await assert.rejects(updateProduct(dbA, A, { ...productInput(tensoativo), type: "PACKAGING" }), /tipo não pode mudar/);
+    await updateProduct(dbA, A, { ...productInput(tensoativo), name: "Tensoativo LAS 90%", priceCents: 1990, minStock: "5" });
+    const p = await dbA.product.findFirstOrThrow({ where: { id: tensoativo.id } });
+    assert.equal(p.name, "Tensoativo LAS 90%");
+    assert.equal(p.minStock.toString(), "5");
+    assert.equal(p.costCents, 1300); // custo médio intocado
+    const log = await dbA.auditLog.findFirstOrThrow({ where: { entityId: tensoativo.id, action: "UPDATE" } });
+    assert.equal((log.before as { name: string }).name, "Tensoativo LAS");
+  });
+
+  await step("edição: org B não edita nem exclui produto da org A", async () => {
+    await assert.rejects(updateProduct(dbB, B, { ...productInput(tensoativo), name: "hack" }), /não encontrado/);
+    await assert.rejects(deleteProduct(dbB, B, tensoativo.id), /não encontrado/);
+  });
+
+  await step("exclusão: produto com estoque ou em fórmula é bloqueado; sem uso é excluído e libera o SKU", async () => {
+    await assert.rejects(deleteProduct(dbA, A, tensoativo.id), /Zere o estoque/);
+    const tampa = await dbA.product.create({
+      data: { organizationId: A.organizationId, sku: "TAMPA", name: "Tampa", type: "PACKAGING", unit: "UN" },
+    });
+    await createFormula(dbA, A, { productId: detergente.id, name: "Tmp", yieldQuantity: "1", items: [{ componentId: tampa.id, quantity: "1" }] });
+    await assert.rejects(deleteProduct(dbA, A, tampa.id), /está em uma fórmula/);
+
+    const rotulo = await dbA.product.create({
+      data: { organizationId: A.organizationId, sku: "ROTULO", name: "Rótulo", type: "PACKAGING", unit: "UN" },
+    });
+    await deleteProduct(dbA, A, rotulo.id);
+    assert.equal(await dbA.product.findFirst({ where: { id: rotulo.id } }), null);
+    const raw = await prisma.product.findUniqueOrThrow({ where: { id: rotulo.id } });
+    assert.ok(raw.deletedAt && raw.sku.startsWith("ROTULO~"));
+    await dbA.product.create({ data: { organizationId: A.organizationId, sku: "ROTULO", name: "Rótulo novo", type: "PACKAGING", unit: "UN" } });
+  });
+
+  await step("edição: cliente aceita limpar campo; exclusão bloqueada com título em aberto", async () => {
+    await updateCustomer(dbA, A, { id: cliente.id, name: "Mercado Bom Preço", phone: "11 99999-0000" });
+    await updateCustomer(dbA, A, { id: cliente.id, name: "Mercado Bom Preço Ltda" });
+    const c = await dbA.customer.findFirstOrThrow({ where: { id: cliente.id } });
+    assert.equal(c.phone, null);
+    assert.equal(c.name, "Mercado Bom Preço Ltda");
+    await assert.rejects(deleteCustomer(dbA, A, cliente.id), /contas a receber em aberto/);
+  });
+
+  await step("exclusão: fornecedor com conta a pagar em aberto é bloqueado; sem pendências é excluído", async () => {
+    const forn = await dbA.supplier.create({ data: { organizationId: A.organizationId, name: "Química X" } });
+    const conta = await createEntry(dbA, A, { type: "PAYABLE", description: "Compra", amountCents: 1000, dueDate: new Date(), supplierId: forn.id });
+    await assert.rejects(deleteSupplier(dbA, A, forn.id), /contas a pagar em aberto/);
+    await cancelEntry(dbA, A, conta.id, "teste");
+    await deleteSupplier(dbA, A, forn.id);
+    assert.equal(await dbA.supplier.findFirst({ where: { id: forn.id } }), null);
+  });
+
+  await step("edição: título respeita valor já pago, recalcula status e bloqueia título pago", async () => {
+    const base = { entryId: receivableId, description: "Pedido #1 (ajustado)", dueDate: new Date("2026-12-20"), customerId: cliente.id };
+    await assert.rejects(updateEntry(dbA, A, { ...base, amountCents: 5000 }), /menor que o total já pago/);
+    await assert.rejects(updateEntry(dbB, B, { ...base, amountCents: 20000 }), /não encontrado/);
+    // tentativa de vincular fornecedor num título a receber é ignorada
+    const e1 = await updateEntry(dbA, A, { ...base, amountCents: 20000, supplierId: "qualquer" });
+    assert.equal(e1.status, "PARTIAL");
+    assert.equal(e1.supplierId, null);
+    const e2 = await updateEntry(dbA, A, { ...base, amountCents: 7352 });
+    assert.equal(e2.status, "PAID");
+    const lastPay = await dbA.financialPayment.findFirstOrThrow({ where: { entryId: receivableId, reversedAt: null }, orderBy: { paidAt: "desc" } });
+    assert.equal(e2.paidAt?.getTime(), lastPay.paidAt.getTime());
+    await assert.rejects(updateEntry(dbA, A, { ...base, amountCents: 9000 }), /pagos ou cancelados não podem ser editados/);
+    const actions = (await dbA.auditLog.findMany({ where: { entityId: receivableId, action: "UPDATE" } })).length;
+    assert.equal(actions, 2);
   });
 
   // ---- Convites e membros ----

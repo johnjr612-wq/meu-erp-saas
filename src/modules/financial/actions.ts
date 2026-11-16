@@ -9,8 +9,9 @@ import {
   reconcilePaymentSchema,
   reversePaymentSchema,
   settleEntrySchema,
+  updateEntrySchema,
 } from "./schemas";
-import { cancelEntry, createEntry, reconcilePayment, reversePayment, settleEntry } from "./service";
+import { cancelEntry, createEntry, reconcilePayment, reversePayment, settleEntry, updateEntry } from "./service";
 
 export const createEntryAction = createAction({
   schema: createEntrySchema,
@@ -46,6 +47,7 @@ export const cancelEntryAction = createAction({
   schema: cancelEntrySchema,
   permission: "financial:write",
   revalidate: "/financeiro",
+  redirectTo: "/financeiro",
   successMessage: "Título cancelado.",
   handler: ({ ctx, db, input }) => cancelEntry(db, ctx, input.entryId, input.reason),
 });
@@ -71,4 +73,15 @@ export const createBankAccountAction = createAction({
       await writeAudit(tx, ctx, { entity: "BankAccount", entityId: account.id, action: "CREATE", after: account });
       return { id: account.id };
     }),
+});
+
+export const updateEntryAction = createAction({
+  schema: updateEntrySchema,
+  permission: "financial:write",
+  revalidate: "/financeiro",
+  successMessage: "Título atualizado.",
+  handler: async ({ ctx, db, input }) => {
+    const entry = await updateEntry(db, ctx, input);
+    return { id: entry.id };
+  },
 });

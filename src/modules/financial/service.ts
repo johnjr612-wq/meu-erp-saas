@@ -55,6 +55,73 @@ export function createEntry(db: TenantDb, ctx: OrgContext, input: CreateEntryInp
   return db.$transaction((tx) => createEntryTx(tx, ctx, input));
 }
 
+/**
+ * Edita um título em aberto/parcial. Tipo não muda; valor não pode ficar
+ * abaixo do já pago; o status é recalculado. Antes/depois vão para a auditoria.
+ */
+export async function updateEntry(
+  db: TenantDb,
+  ctx: OrgContext,
+  input: {
+    entryId: string;
+    description: string;
+    category?: string;
+    amountCents: number;
+    dueDate: Date;
+    customerId?: string;
+    supplierId?: string;
+    documentNumber?: string;
+  },
+) {
+  return db.$transaction(async (tx) => {
+    const before = await tx.financialEntry.findFirst({ where: { id: input.entryId } });
+    if (!before) throw new DomainError("Título não encontrado.");
+    if (before.status === "PAID" || before.status === "CANCELED") {
+      throw new DomainError("Títulos pagos ou cancelados não podem ser editados. Estorne a baixa antes.");
+    }
+    if (input.amountCents < before.paidAmountCents) {
+      throw new DomainError("O valor não pode ser menor que o total já pago neste título.");
+    }
+
+    const customerId = before.type === "RECEIVABLE" ? (input.customerId ?? null) : null;
+    const supplierId = before.type === "PAYABLE" ? (input.supplierId ?? null) : null;
+    if (customerId && !(await tx.customer.findFirst({ where: { id: customerId }, select: { id: true } }))) {
+      throw new DomainError("Cliente não encontrado.");
+    }
+    if (supplierId && !(await tx.supplier.findFirst({ where: { id: supplierId }, select: { id: true } }))) {
+      throw new DomainError("Fornecedor não encontrado.");
+    }
+
+    const status = statusFor(input.amountCents, before.paidAmountCents);
+    // Quitado por redução de valor: a data de pagamento é a da última baixa válida.
+    const lastPayment =
+      status === "PAID"
+        ? await tx.financialPayment.findFirst({
+            where: { entryId: before.id, reversedAt: null },
+            orderBy: { paidAt: "desc" },
+            select: { paidAt: true },
+          })
+        : null;
+    const after = await tx.financialEntry.update({
+      where: { id: before.id },
+      data: {
+        description: input.description,
+        category: input.category ?? null,
+        amountCents: input.amountCents,
+        dueDate: input.dueDate,
+        documentNumber: input.documentNumber ?? null,
+        customerId,
+        supplierId,
+        status,
+        paidAt: lastPayment?.paidAt ?? null,
+        updatedBy: ctx.userId,
+      },
+    });
+    await writeAudit(tx, ctx, { entity: "FinancialEntry", entityId: before.id, action: "UPDATE", before, after });
+    return after;
+  });
+}
+
 /** Baixa total ou parcial de um título. */
 export async function settleEntry(
   db: TenantDb,

@@ -1,6 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { tenantDb, TenantIsolationError, type TenantDb } from "@/lib/db";
 import { DomainError } from "@/lib/errors";
 import { assertPermission, ForbiddenError, type Permission } from "@/lib/permissions";
@@ -40,6 +41,11 @@ export function createAction<S extends z.ZodObject, T>(opts: {
   /** Caminho relativo à org para revalidar, ex.: "/estoque". */
   revalidate?: string;
   successMessage?: string;
+  /**
+   * Caminho relativo à org para onde ir após sucesso (ex.: "/cadastros" após excluir).
+   * O redirect é feito no servidor: a página atual pode nem existir mais (registro excluído).
+   */
+  redirectTo?: string;
   handler: (args: HandlerArgs<z.output<S>>) => Promise<T>;
 }) {
   const schema = baseSchema.extend(opts.schema.shape);
@@ -55,8 +61,12 @@ export function createAction<S extends z.ZodObject, T>(opts: {
       };
     }
 
+    let result: ActionResult<T>;
+    let redirectPath: string | null = null;
     try {
-      const { orgSlug } = parsed.data as { orgSlug: string };
+      // orgSlug só serve para resolver o contexto; nunca chega ao handler
+      // (handlers repassam o input ao Prisma e um campo extra quebra a escrita).
+      const { orgSlug, ...input } = parsed.data as { orgSlug: string } & Record<string, unknown>;
       const ctx = await getOrgContext(orgSlug);
       if (!ctx) throw new ForbiddenError("Organização não encontrada.");
       assertPermission(ctx, opts.permission);
@@ -64,14 +74,18 @@ export function createAction<S extends z.ZodObject, T>(opts: {
       const data = await opts.handler({
         ctx,
         db: tenantDb(ctx.organizationId),
-        input: parsed.data as z.output<S>,
+        input: input as z.output<S>,
       });
 
       if (opts.revalidate) revalidatePath(`/${ctx.orgSlug}${opts.revalidate}`);
-      return { ok: true, data, message: opts.successMessage };
+      if (opts.redirectTo) redirectPath = `/${ctx.orgSlug}${opts.redirectTo}`;
+      result = { ok: true, data, message: opts.successMessage };
     } catch (err) {
-      return { ok: false, error: toUserMessage(err) };
+      result = { ok: false, error: toUserMessage(err) };
     }
+    // fora do try: redirect() funciona lançando uma exceção interna do Next
+    if (redirectPath) redirect(redirectPath);
+    return result;
   };
 }
 
