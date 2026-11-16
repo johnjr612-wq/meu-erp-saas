@@ -32,3 +32,10 @@ export const productSchema = z.object({
 });
 
 export const idSchema = z.object({ id: z.string().min(1) });
+
+const withId = { id: z.string().min(1) };
+
+export const updateCustomerSchema = customerSchema.extend(withId);
+export const updateSupplierSchema = supplierSchema.extend(withId);
+/** Custo médio não é editável: vem do estoque (entradas e produção). */
+export const updateProductSchema = productSchema.omit({ costCents: true }).extend(withId);

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ActionForm, FormField } from "@/components/forms/action-form";
 import { EmptyRow, PageHeader } from "@/components/layout/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -75,7 +76,14 @@ export default async function RegistryPage({ params }: { params: Promise<{ orgSl
               {products.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell className="font-mono text-xs">{p.sku}</TableCell>
-                  <TableCell>{p.name}</TableCell>
+                  <TableCell>
+                    <Link
+                      href={`/${ctx.orgSlug}/cadastros/produtos/${p.id}`}
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {p.name}
+                    </Link>
+                  </TableCell>
                   <TableCell>
                     <Badge variant="secondary">{LABELS.productType[p.type]}</Badge>
                   </TableCell>
@@ -119,7 +127,14 @@ export default async function RegistryPage({ params }: { params: Promise<{ orgSl
                 {customers.length === 0 && <EmptyRow colSpan={3}>Nenhum cliente.</EmptyRow>}
                 {customers.map((c) => (
                   <TableRow key={c.id}>
-                    <TableCell>{c.name}</TableCell>
+                    <TableCell>
+                      <Link
+                        href={`/${ctx.orgSlug}/cadastros/clientes/${c.id}`}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        {c.name}
+                      </Link>
+                    </TableCell>
                     <TableCell>{c.document ?? "—"}</TableCell>
                     <TableCell>{c.city ?? "—"}</TableCell>
                   </TableRow>
@@ -153,7 +168,14 @@ export default async function RegistryPage({ params }: { params: Promise<{ orgSl
                 {suppliers.length === 0 && <EmptyRow colSpan={2}>Nenhum fornecedor.</EmptyRow>}
                 {suppliers.map((s) => (
                   <TableRow key={s.id}>
-                    <TableCell>{s.name}</TableCell>
+                    <TableCell>
+                      <Link
+                        href={`/${ctx.orgSlug}/cadastros/fornecedores/${s.id}`}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        {s.name}
+                      </Link>
+                    </TableCell>
                     <TableCell>{s.document ?? "—"}</TableCell>
                   </TableRow>
                 ))}

@@ -24,6 +24,13 @@ export function parseBRLToCents(input: string): number | null {
   return sign ? -cents : cents;
 }
 
+/** Centavos → texto para campo de formulário ("1234,50"), sem ponto flutuante. */
+export function centsToInput(cents: number): string {
+  const sign = cents < 0 ? "-" : "";
+  const abs = Math.abs(cents);
+  return `${sign}${Math.trunc(abs / 100)},${String(abs % 100).padStart(2, "0")}`;
+}
+
 export function formatCents(cents: number): string {
   return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents / 100);
 }

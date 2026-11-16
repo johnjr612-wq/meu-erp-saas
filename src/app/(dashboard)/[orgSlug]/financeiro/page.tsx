@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ActionForm, FormField } from "@/components/forms/action-form";
 import { EmptyRow, PageHeader } from "@/components/layout/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -210,7 +211,14 @@ export default async function FinancialPage({ params }: { params: Promise<{ orgS
                   <TableRow key={e.id}>
                     <TableCell className={overdue ? "text-destructive" : ""}>{formatDate(e.dueDate)}</TableCell>
                     <TableCell>{LABELS.entryType[e.type]}</TableCell>
-                    <TableCell>{e.description}</TableCell>
+                    <TableCell>
+                      <Link
+                        href={`/${ctx.orgSlug}/financeiro/titulos/${e.id}`}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        {e.description}
+                      </Link>
+                    </TableCell>
                     <TableCell>{e.customer?.name ?? e.supplier?.name ?? "—"}</TableCell>
                     <TableCell>
                       <Badge variant={e.status === "PAID" ? "default" : overdue ? "destructive" : "secondary"}>

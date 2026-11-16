@@ -42,3 +42,14 @@ export const createBankAccountSchema = z.object({
   name: z.string().min(2).max(80),
   openingBalanceCents: centsField.default(0),
 });
+
+export const updateEntrySchema = z.object({
+  entryId: z.string().min(1),
+  description: z.string().min(2).max(200),
+  category: z.string().max(80).optional(),
+  amountCents: positiveCents,
+  dueDate: z.coerce.date(),
+  customerId: z.string().optional(),
+  supplierId: z.string().optional(),
+  documentNumber: z.string().max(60).optional(),
+});

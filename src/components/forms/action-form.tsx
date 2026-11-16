@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useActionState, useContext, useEffect, useRef, type ReactNode } from "react";
+import { createContext, startTransition, useActionState, useContext, useEffect, useRef, type ReactNode } from "react";
 import { useFormStatus } from "react-dom";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ export function ActionForm({
   className,
   submitVariant,
   confirmMessage,
+  resetOnSuccess = true,
 }: {
   action: (input: FormData) => Promise<ActionResult>;
   orgSlug: string;
@@ -36,24 +37,33 @@ export function ActionForm({
   submitVariant?: "default" | "outline" | "destructive" | "secondary";
   /** Pede confirmação antes de enviar (ações destrutivas). */
   confirmMessage?: string;
+  /** Limpa o formulário após sucesso (false em telas de edição). */
+  resetOnSuccess?: boolean;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
-  const [state, formAction] = useActionState<ActionResult | null, FormData>(
+  const [state, formAction, pending] = useActionState<ActionResult | null, FormData>(
     (_prev, formData) => action(formData),
     null,
   );
 
   useEffect(() => {
-    if (state?.ok) formRef.current?.reset();
-  }, [state]);
+    if (state?.ok && resetOnSuccess) formRef.current?.reset();
+  }, [state, resetOnSuccess]);
 
   return (
     <FieldErrorsContext.Provider value={state && !state.ok ? (state.fieldErrors ?? {}) : {}}>
+      {/*
+        Envio via onSubmit (e não <form action>): o React 19 limpa formulários com action
+        após cada envio, inclusive com erro — o usuário perderia o que digitou.
+      */}
       <form
         ref={formRef}
-        action={formAction}
         onSubmit={(e) => {
-          if (confirmMessage && !window.confirm(confirmMessage)) e.preventDefault();
+          e.preventDefault();
+          if (pending) return;
+          if (confirmMessage && !window.confirm(confirmMessage)) return;
+          const formData = new FormData(e.currentTarget);
+          startTransition(() => formAction(formData));
         }}
         className={cn("grid gap-3", className)}
       >
@@ -61,7 +71,7 @@ export function ActionForm({
         {hidden && Object.entries(hidden).map(([k, v]) => <input key={k} type="hidden" name={k} value={v} />)}
         {children}
         <div className="flex items-center gap-3">
-          <SubmitButton label={submitLabel} variant={submitVariant} />
+          <SubmitButton label={submitLabel} variant={submitVariant} pending={pending} />
           {state && (
             <p role="status" className={cn("text-sm", state.ok ? "text-emerald-600" : "text-destructive")}>
               {state.ok ? (state.message ?? "Salvo.") : state.error}
@@ -76,11 +86,15 @@ export function ActionForm({
 export function SubmitButton({
   label,
   variant,
+  pending: pendingProp,
 }: {
   label: string;
   variant?: "default" | "outline" | "destructive" | "secondary";
+  /** Para formulários enviados via onSubmit (useFormStatus só enxerga <form action>). */
+  pending?: boolean;
 }) {
-  const { pending } = useFormStatus();
+  const status = useFormStatus();
+  const pending = pendingProp ?? status.pending;
   return (
     <Button type="submit" disabled={pending} variant={variant} size={variant === "outline" ? "sm" : "default"}>
       {pending && <Loader2 className="animate-spin" />}
