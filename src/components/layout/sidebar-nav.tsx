@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Boxes, LayoutDashboard, Settings, ShoppingCart, Users, Wallet } from "lucide-react";
+import { BarChart3, Boxes, LayoutDashboard, Settings, ShoppingCart, Users, Wallet } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const ITEMS = [
@@ -11,6 +11,7 @@ const ITEMS = [
   { href: "vendas", label: "Vendas", icon: ShoppingCart },
   { href: "estoque", label: "Estoque e Produção", icon: Boxes },
   { href: "financeiro", label: "Financeiro", icon: Wallet },
+  { href: "relatorios", label: "Relatórios", icon: BarChart3 },
   { href: "config", label: "Configurações", icon: Settings },
 ] as const;
 
