@@ -6,7 +6,7 @@ import { EmptyRow, PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { NativeSelect } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatDate, formatQty, LABELS } from "@/lib/format";
+import { formatDate, formatQty, LABELS, qtyToInput } from "@/lib/format";
 import { centsToInput, formatCents } from "@/lib/money";
 import { can } from "@/lib/permissions";
 import { deleteProductAction, updateProductAction } from "@/modules/registry/actions";
@@ -77,7 +77,7 @@ export default async function EditProductPage({ params }: { params: Promise<{ or
                 <FormField
                   name="minStock"
                   label="Estoque mínimo"
-                  defaultValue={product.minStock.toString()}
+                  defaultValue={qtyToInput(product.minStock)}
                   inputMode="decimal"
                 />
               </div>

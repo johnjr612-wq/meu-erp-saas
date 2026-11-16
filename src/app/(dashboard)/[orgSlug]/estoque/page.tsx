@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ActionForm, FormField } from "@/components/forms/action-form";
 import { LineItemsForm } from "@/components/forms/line-items-form";
 import { EmptyRow, PageHeader } from "@/components/layout/page-header";
@@ -9,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatDate, formatQty, LABELS } from "@/lib/format";
 import { can } from "@/lib/permissions";
 import {
+  cancelProductionOrderAction,
   completeProductionOrderAction,
   createFormulaAction,
   createProductionOrderAction,
@@ -132,6 +134,24 @@ export default async function InventoryPage({ params }: { params: Promise<{ orgS
                     </NativeSelect>
                   </FormField>
                 </ActionForm>
+              <ActionForm
+                action={cancelProductionOrderAction}
+                orgSlug={ctx.orgSlug}
+                submitLabel="Cancelar OP"
+                submitVariant="outline"
+                confirmMessage="Cancelar esta ordem de produção planejada? Nada foi consumido do estoque."
+              >
+                <FormField name="productionOrderId" label="Cancelar OP planejada">
+                  <NativeSelect id="cancel-productionOrderId" name="productionOrderId" required>
+                    {planned.length === 0 && <option value="">Nenhuma OP planejada</option>}
+                    {planned.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        OP #{o.number} · {o.product.name} · lote {o.lot}
+                      </option>
+                    ))}
+                  </NativeSelect>
+                </FormField>
+              </ActionForm>
             </CardContent>
           </Card>
         )}
@@ -168,6 +188,42 @@ export default async function InventoryPage({ params }: { params: Promise<{ orgS
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Fórmulas</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Fórmula</TableHead>
+                <TableHead>Produto gerado</TableHead>
+                <TableHead className="text-right">Insumos</TableHead>
+                <TableHead className="text-right">Rendimento</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {formulas.length === 0 && <EmptyRow colSpan={4}>Nenhuma fórmula cadastrada.</EmptyRow>}
+              {formulas.map((f) => (
+                <TableRow key={f.id}>
+                  <TableCell>
+                    <Link
+                      href={`/${ctx.orgSlug}/estoque/formulas/${f.id}`}
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {f.name}
+                    </Link>
+                  </TableCell>
+                  <TableCell>{f.product.name}</TableCell>
+                  <TableCell className="text-right tabular-nums">{f._count.items}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatQty(f.yieldQuantity)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

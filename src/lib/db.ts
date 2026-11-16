@@ -54,7 +54,8 @@ const NO_HARD_DELETE_MODELS = new Set([
   "StockMovement",
   "FinancialPayment",
   "AuditLog",
-  "SalesOrderItem",
+  // SalesOrderItem não entra: itens de ORÇAMENTO podem ser substituídos na edição.
+  // Pedido confirmado é imutável pelo serviço de vendas (só status QUOTE é editável).
 ]);
 
 const READ_OPS = new Set([

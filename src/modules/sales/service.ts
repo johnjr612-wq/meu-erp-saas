@@ -1,7 +1,7 @@
 import "server-only";
 import { Prisma } from "@/generated/prisma/client";
 import { writeAudit } from "@/lib/audit";
-import type { TenantDb } from "@/lib/db";
+import type { TenantDb, TenantTx } from "@/lib/db";
 import { DomainError } from "@/lib/errors";
 import type { OrgContext } from "@/lib/session";
 import { assertPlanLimit } from "@/modules/billing/service";
@@ -9,6 +9,30 @@ import { createEntryTx } from "@/modules/financial/service";
 import { registerStockMovement } from "@/modules/inventory/service";
 
 const Decimal = Prisma.Decimal;
+
+/** Preços SEMPRE do cadastro (nunca do cliente). Só produto acabado pode ser vendido. */
+async function priceItems(tx: TenantTx, ctx: OrgContext, lines: { productId: string; quantity: string }[]) {
+  const productIds = [...new Set(lines.map((i) => i.productId))];
+  const products = await tx.product.findMany({
+    where: { id: { in: productIds }, type: "FINISHED_GOOD" },
+    select: { id: true, priceCents: true },
+  });
+  const priceById = new Map(products.map((p) => [p.id, p.priceCents]));
+
+  const items = lines.map((item) => {
+    const unitPriceCents = priceById.get(item.productId);
+    if (unitPriceCents === undefined) throw new DomainError("Produto inválido no pedido.");
+    const totalCents = new Decimal(item.quantity).mul(unitPriceCents).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toNumber();
+    return {
+      organizationId: ctx.organizationId, // escrita aninhada: tenant explícito
+      productId: item.productId,
+      quantity: item.quantity,
+      unitPriceCents,
+      totalCents,
+    };
+  });
+  return { items, subtotalCents: items.reduce((sum, i) => sum + i.totalCents, 0) };
+}
 
 /**
  * Cria um orçamento. Os preços SEMPRE vêm do cadastro do produto (nunca do cliente).
@@ -24,30 +48,7 @@ export async function createSalesOrder(
     const customer = await tx.customer.findFirst({ where: { id: input.customerId }, select: { id: true } });
     if (!customer) throw new DomainError("Cliente não encontrado.");
 
-    const productIds = [...new Set(input.items.map((i) => i.productId))];
-    const products = await tx.product.findMany({
-      where: { id: { in: productIds }, type: "FINISHED_GOOD" },
-      select: { id: true, priceCents: true },
-    });
-    const priceById = new Map(products.map((p) => [p.id, p.priceCents]));
-
-    const items = input.items.map((item) => {
-      const unitPriceCents = priceById.get(item.productId);
-      if (unitPriceCents === undefined) throw new DomainError("Produto inválido no pedido.");
-      const totalCents = new Decimal(item.quantity)
-        .mul(unitPriceCents)
-        .toDecimalPlaces(0, Decimal.ROUND_HALF_UP)
-        .toNumber();
-      return {
-        organizationId: ctx.organizationId, // escrita aninhada: tenant explícito
-        productId: item.productId,
-        quantity: item.quantity,
-        unitPriceCents,
-        totalCents,
-      };
-    });
-
-    const subtotalCents = items.reduce((sum, i) => sum + i.totalCents, 0);
+    const { items, subtotalCents } = await priceItems(tx, ctx, input.items);
     if (input.discountCents > subtotalCents) throw new DomainError("Desconto maior que o subtotal.");
 
     const last = await tx.salesOrder.aggregate({ _max: { number: true } });
@@ -65,6 +66,55 @@ export async function createSalesOrder(
         items: { create: items },
       },
     });
+  });
+}
+
+/**
+ * Edita um ORÇAMENTO (pedido confirmado é imutável). Itens são substituídos e
+ * repreçados pelo cadastro atual; antes/depois vão para a auditoria.
+ */
+export async function updateQuote(
+  db: TenantDb,
+  ctx: OrgContext,
+  input: {
+    salesOrderId: string;
+    customerId: string;
+    discountCents: number;
+    notes?: string;
+    items: { productId: string; quantity: string }[];
+  },
+) {
+  return db.$transaction(async (tx) => {
+    const before = await tx.salesOrder.findFirst({ where: { id: input.salesOrderId }, include: { items: true } });
+    if (!before) throw new DomainError("Pedido não encontrado.");
+    if (before.status !== "QUOTE") throw new DomainError("Somente orçamentos podem ser editados.");
+
+    const customer = await tx.customer.findFirst({ where: { id: input.customerId }, select: { id: true } });
+    if (!customer) throw new DomainError("Cliente não encontrado.");
+
+    const { items, subtotalCents } = await priceItems(tx, ctx, input.items);
+    if (input.discountCents > subtotalCents) throw new DomainError("Desconto maior que o subtotal.");
+
+    // status no where: se outra pessoa confirmou no meio-tempo, nada é alterado
+    const claimed = await tx.salesOrder.updateMany({
+      where: { id: before.id, status: "QUOTE" },
+      data: {
+        customerId: customer.id,
+        notes: input.notes ?? null,
+        subtotalCents,
+        discountCents: input.discountCents,
+        totalCents: subtotalCents - input.discountCents,
+        updatedBy: ctx.userId,
+      },
+    });
+    if (claimed.count !== 1) throw new DomainError("O orçamento foi confirmado ou cancelado por outra pessoa.");
+
+    await tx.salesOrderItem.deleteMany({ where: { salesOrderId: before.id } });
+    await tx.salesOrderItem.createMany({ data: items.map((i) => ({ ...i, salesOrderId: before.id })) });
+
+    const after = await tx.salesOrder.findFirstOrThrow({ where: { id: before.id }, include: { items: true } });
+    await writeAudit(tx, ctx, { entity: "SalesOrder", entityId: before.id, action: "UPDATE", before, after });
+    return after;
   });
 }
 

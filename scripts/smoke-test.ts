@@ -15,8 +15,16 @@ import { prisma, tenantDb, TenantIsolationError } from "@/lib/db";
 import type { OrgContext } from "@/lib/session";
 import { DomainError } from "@/lib/errors";
 import { parseBRLToCents } from "@/lib/money";
-import { completeProductionOrder, createFormula, createProductionOrder, registerStockMovement } from "@/modules/inventory/service";
-import { confirmSalesOrder, createSalesOrder } from "@/modules/sales/service";
+import {
+  cancelProductionOrder,
+  completeProductionOrder,
+  createFormula,
+  createProductionOrder,
+  deleteFormula,
+  registerStockMovement,
+  updateFormula,
+} from "@/modules/inventory/service";
+import { confirmSalesOrder, createSalesOrder, updateQuote } from "@/modules/sales/service";
 import { cancelEntry, createEntry, getBankBalances, reversePayment, settleEntry, updateEntry } from "@/modules/financial/service";
 import { deleteCustomer, deleteProduct, deleteSupplier, updateCustomer, updateProduct } from "@/modules/registry/service";
 import {
@@ -216,6 +224,85 @@ async function main() {
     assert.equal(raw.deletedBy, A.userId);
     const logs = await dbA.auditLog.findMany({ where: { entityId: entry.id } });
     assert.deepEqual(logs.map((l) => l.action).sort(), ["CREATE", "SOFT_DELETE"]);
+  });
+
+  // ---- Edição de fórmulas e orçamentos ----
+  await step("fórmula: com OP planejada só nome muda; cancelar OP libera rendimento e insumos", async () => {
+    const planned = await dbA.productionOrder.findFirstOrThrow({ where: { lot: "L002" } }); // sobrou do teste de rollback
+    assert.equal(planned.status, "PLANNED");
+    const items = [
+      { componentId: tensoativo.id, quantity: "3" },
+      { componentId: agua.id, quantity: "47" },
+      { componentId: frasco.id, quantity: "100" },
+    ];
+    await updateFormula(dbA, A, { formulaId: formula.id, name: "Detergente neutro v2", yieldQuantity: "100", items });
+    await assert.rejects(
+      updateFormula(dbA, A, { formulaId: formula.id, name: "x", yieldQuantity: "120", items }),
+      /ordem\(ns\) de produção planejada/,
+    );
+    await assert.rejects(deleteFormula(dbA, A, formula.id), /planejadas/);
+    await assert.rejects(updateFormula(dbB, B, { formulaId: formula.id, name: "hack", yieldQuantity: "100", items }), /não encontrada/);
+
+    await cancelProductionOrder(dbA, A, planned.id);
+    await assert.rejects(cancelProductionOrder(dbA, A, planned.id), /Só ordens planejadas/);
+    const done = await dbA.productionOrder.findFirstOrThrow({ where: { lot: "L001" } });
+    await assert.rejects(cancelProductionOrder(dbA, A, done.id), /Só ordens planejadas/);
+
+    const updated = await updateFormula(dbA, A, {
+      formulaId: formula.id,
+      name: "Detergente neutro v2",
+      yieldQuantity: "200",
+      items: [{ componentId: tensoativo.id, quantity: "5" }, { componentId: agua.id, quantity: "95" }],
+    });
+    assert.equal(updated.items.length, 2);
+    assert.equal(updated.yieldQuantity.toString(), "200");
+    assert.equal(await prisma.formulaItem.count({ where: { formulaId: formula.id } }), 2);
+    const log = await dbA.auditLog.findFirstOrThrow({ where: { entityId: formula.id }, orderBy: { createdAt: "desc" } });
+    assert.equal((log.before as { items: unknown[] }).items.length, 3);
+  });
+
+  await step("fórmula: insumo repetido, produto acabado ou o próprio produto são recusados", async () => {
+    const base = { formulaId: formula.id, name: "Detergente neutro v2", yieldQuantity: "200" };
+    await assert.rejects(updateFormula(dbA, A, { ...base, items: [{ componentId: agua.id, quantity: "1" }, { componentId: agua.id, quantity: "2" }] }), /repetido/);
+    await assert.rejects(updateFormula(dbA, A, { ...base, items: [{ componentId: detergente.id, quantity: "1" }] }), /si mesmo/);
+  });
+
+  await step("orçamento: edição repreça pelo cadastro, troca itens e recalcula totais", async () => {
+    const quote = await createSalesOrder(dbA, A, { customerId: cliente.id, discountCents: 0, items: [{ productId: detergente.id, quantity: "10" }] });
+    await dbA.product.update({ where: { id: detergente.id }, data: { priceCents: 399 } });
+    const edited = await updateQuote(dbA, A, {
+      salesOrderId: quote.id,
+      customerId: cliente.id,
+      discountCents: 100,
+      notes: "Entrega sexta",
+      items: [{ productId: detergente.id, quantity: "20" }],
+    });
+    assert.equal(edited.items.length, 1);
+    assert.equal(edited.items[0].unitPriceCents, 399);
+    assert.equal(edited.subtotalCents, 7980);
+    assert.equal(edited.totalCents, 7880);
+    assert.equal(edited.notes, "Entrega sexta");
+    await assert.rejects(
+      updateQuote(dbA, A, { salesOrderId: quote.id, customerId: cliente.id, discountCents: 999999, items: [{ productId: detergente.id, quantity: "1" }] }),
+      /Desconto maior/,
+    );
+    await assert.rejects(
+      updateQuote(dbA, A, { salesOrderId: quote.id, customerId: cliente.id, discountCents: 0, items: [{ productId: agua.id, quantity: "1" }] }),
+      /Produto inválido/,
+    );
+    await assert.rejects(
+      updateQuote(dbB, B, { salesOrderId: quote.id, customerId: cliente.id, discountCents: 0, items: [{ productId: detergente.id, quantity: "1" }] }),
+      /não encontrado/,
+    );
+  });
+
+  await step("orçamento: pedido confirmado não pode ser editado e mantém os itens", async () => {
+    const confirmed = await dbA.salesOrder.findFirstOrThrow({ where: { status: "CONFIRMED" }, include: { items: true } });
+    await assert.rejects(
+      updateQuote(dbA, A, { salesOrderId: confirmed.id, customerId: cliente.id, discountCents: 0, items: [{ productId: detergente.id, quantity: "1" }] }),
+      /Somente orçamentos/,
+    );
+    assert.equal(await dbA.salesOrderItem.count({ where: { salesOrderId: confirmed.id } }), confirmed.items.length);
   });
 
   // ---- Edição e exclusão ----

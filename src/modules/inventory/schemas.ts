@@ -36,3 +36,9 @@ export const createFormulaSchema = z.object({
     )
     .min(1, "Inclua ao menos um insumo"),
 });
+
+export const updateFormulaSchema = createFormulaSchema.omit({ productId: true }).extend({
+  formulaId: z.string().min(1),
+});
+
+export const formulaIdSchema = z.object({ formulaId: z.string().min(1) });

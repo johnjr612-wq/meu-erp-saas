@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ActionForm, FormField } from "@/components/forms/action-form";
 import { LineItemsForm } from "@/components/forms/line-items-form";
 import { EmptyRow, PageHeader } from "@/components/layout/page-header";
@@ -135,7 +136,11 @@ export default async function SalesPage({ params }: { params: Promise<{ orgSlug:
               {orders.length === 0 && <EmptyRow colSpan={6}>Nenhum pedido.</EmptyRow>}
               {orders.map((o) => (
                 <TableRow key={o.id}>
-                  <TableCell>#{o.number}</TableCell>
+                  <TableCell>
+                    <Link href={`/${ctx.orgSlug}/vendas/${o.id}`} className="font-medium text-primary hover:underline">
+                      #{o.number}
+                    </Link>
+                  </TableCell>
                   <TableCell>{o.customer.name}</TableCell>
                   <TableCell>{o._count.items}</TableCell>
                   <TableCell>

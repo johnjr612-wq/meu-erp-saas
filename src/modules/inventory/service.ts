@@ -1,6 +1,7 @@
 import "server-only";
 import { Prisma } from "@/generated/prisma/client";
 import type { StockMovementType } from "@/generated/prisma/enums";
+import { writeAudit } from "@/lib/audit";
 import type { TenantDb, TenantTx } from "@/lib/db";
 import { DomainError } from "@/lib/errors";
 import type { OrgContext } from "@/lib/session";
@@ -217,5 +218,109 @@ export async function completeProductionOrder(db: TenantDb, ctx: OrgContext, pro
       where: { id: order.id },
       data: { status: "COMPLETED", completedAt: new Date(), updatedBy: ctx.userId },
     });
+  });
+}
+
+// -----------------------------------------------------------------------------
+// Edição de fórmulas e cancelamento de OP
+// -----------------------------------------------------------------------------
+
+async function assertValidComponents(tx: TenantTx, outputProductId: string, items: { componentId: string }[]) {
+  const componentIds = [...new Set(items.map((i) => i.componentId))];
+  if (componentIds.length !== items.length) throw new DomainError("Insumo repetido na fórmula.");
+  if (componentIds.includes(outputProductId)) throw new DomainError("O produto não pode ser insumo de si mesmo.");
+  const found = await tx.product.count({ where: { id: { in: componentIds }, type: { not: "FINISHED_GOOD" } } });
+  if (found !== componentIds.length) throw new DomainError("Insumo inválido na fórmula.");
+}
+
+/**
+ * Edita a fórmula. Rendimento e insumos ficam travados enquanto houver OP
+ * PLANEJADA usando a fórmula (a OP consumiria algo diferente do planejado).
+ * OPs concluídas não mudam: o consumo delas já está no ledger de estoque.
+ */
+export async function updateFormula(
+  db: TenantDb,
+  ctx: OrgContext,
+  input: {
+    formulaId: string;
+    name: string;
+    yieldQuantity: string;
+    instructions?: string;
+    items: { componentId: string; quantity: string }[];
+  },
+) {
+  return db.$transaction(async (tx) => {
+    const before = await tx.formula.findFirst({ where: { id: input.formulaId }, include: { items: true } });
+    if (!before) throw new DomainError("Fórmula não encontrada.");
+
+    const sameItems =
+      before.items.length === input.items.length &&
+      input.items.every((i) =>
+        before.items.some((b) => b.componentId === i.componentId && b.quantity.equals(new Decimal(i.quantity))),
+      );
+    const recipeChanged = !before.yieldQuantity.equals(new Decimal(input.yieldQuantity)) || !sameItems;
+
+    if (recipeChanged) {
+      const planned = await tx.productionOrder.count({ where: { formulaId: before.id, status: "PLANNED" } });
+      if (planned > 0) {
+        throw new DomainError(
+          `Há ${planned} ordem(ns) de produção planejada(s) com esta fórmula. Conclua ou cancele antes de mudar rendimento ou insumos.`,
+        );
+      }
+      await assertValidComponents(tx, before.productId, input.items);
+      // FormulaItem não tem histórico próprio: o antes/depois fica na auditoria.
+      await tx.formulaItem.deleteMany({ where: { formulaId: before.id } });
+      await tx.formulaItem.createMany({
+        data: input.items.map((i) => ({
+          organizationId: ctx.organizationId,
+          formulaId: before.id,
+          componentId: i.componentId,
+          quantity: i.quantity,
+        })),
+      });
+    }
+
+    const after = await tx.formula.update({
+      where: { id: before.id },
+      data: {
+        name: input.name,
+        yieldQuantity: input.yieldQuantity,
+        instructions: input.instructions ?? null,
+        updatedBy: ctx.userId,
+      },
+      include: { items: true },
+    });
+    await writeAudit(tx, ctx, { entity: "Formula", entityId: before.id, action: "UPDATE", before, after });
+    return after;
+  });
+}
+
+export async function deleteFormula(db: TenantDb, ctx: OrgContext, formulaId: string) {
+  await db.$transaction(async (tx) => {
+    const formula = await tx.formula.findFirst({ where: { id: formulaId }, include: { items: true } });
+    if (!formula) throw new DomainError("Fórmula não encontrada.");
+    if ((await tx.productionOrder.count({ where: { formulaId, status: "PLANNED" } })) > 0) {
+      throw new DomainError("Há ordens de produção planejadas com esta fórmula. Conclua ou cancele antes.");
+    }
+    await tx.formula.update({
+      where: { id: formulaId },
+      data: { deletedAt: new Date(), updatedBy: ctx.userId },
+    });
+    await writeAudit(tx, ctx, { entity: "Formula", entityId: formulaId, action: "SOFT_DELETE", before: formula });
+  });
+}
+
+/** Cancela OP ainda planejada (nada foi consumido, então o estoque não muda). */
+export async function cancelProductionOrder(db: TenantDb, ctx: OrgContext, productionOrderId: string) {
+  await db.$transaction(async (tx) => {
+    const order = await tx.productionOrder.findFirst({ where: { id: productionOrderId } });
+    if (!order) throw new DomainError("Ordem de produção não encontrada.");
+    // condicional: protege contra concluir e cancelar ao mesmo tempo
+    const updated = await tx.productionOrder.updateMany({
+      where: { id: order.id, status: "PLANNED" },
+      data: { status: "CANCELED", updatedBy: ctx.userId },
+    });
+    if (updated.count !== 1) throw new DomainError("Só ordens planejadas podem ser canceladas.");
+    await writeAudit(tx, ctx, { entity: "ProductionOrder", entityId: order.id, action: "CANCEL", before: order });
   });
 }

@@ -1,8 +1,8 @@
 "use server";
 
 import { createAction } from "@/lib/action";
-import { cancelSalesOrderSchema, confirmSalesOrderSchema, createSalesOrderSchema } from "./schemas";
-import { cancelSalesOrder, confirmSalesOrder, createSalesOrder } from "./service";
+import { cancelSalesOrderSchema, confirmSalesOrderSchema, createSalesOrderSchema, updateQuoteSchema } from "./schemas";
+import { cancelSalesOrder, confirmSalesOrder, createSalesOrder, updateQuote } from "./service";
 
 export const createSalesOrderAction = createAction({
   schema: createSalesOrderSchema,
@@ -32,4 +32,15 @@ export const cancelSalesOrderAction = createAction({
   revalidate: "/vendas",
   successMessage: "Orçamento cancelado.",
   handler: ({ ctx, db, input }) => cancelSalesOrder(db, ctx, input.salesOrderId),
+});
+
+export const updateQuoteAction = createAction({
+  schema: updateQuoteSchema,
+  permission: "sales:write",
+  revalidate: "/vendas",
+  successMessage: "Orçamento atualizado.",
+  handler: async ({ ctx, db, input }) => {
+    const order = await updateQuote(db, ctx, input);
+    return { id: order.id, totalCents: order.totalCents };
+  },
 });
