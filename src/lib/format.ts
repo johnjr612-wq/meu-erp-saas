@@ -31,3 +31,8 @@ export const LABELS = {
     TRANSFER: "Transferência",
   },
 } as const;
+
+/** Quantidade para campo de formulário, com vírgula decimal ("46,5"). */
+export function qtyToInput(q: Prisma.Decimal | string | number): string {
+  return q.toString().replace(".", ",");
+}

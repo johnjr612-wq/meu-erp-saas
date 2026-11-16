@@ -23,3 +23,5 @@ export const confirmSalesOrderSchema = z.object({
 export const cancelSalesOrderSchema = z.object({
   salesOrderId: z.string().min(1),
 });
+
+export const updateQuoteSchema = createSalesOrderSchema.extend({ salesOrderId: z.string().min(1) });

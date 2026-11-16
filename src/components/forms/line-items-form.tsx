@@ -22,6 +22,8 @@ export function LineItemsForm({
   itemLabel,
   submitLabel,
   children,
+  initialLines,
+  resetOnSuccess = true,
 }: {
   action: (input: Record<string, unknown>) => Promise<ActionResult>;
   orgSlug: string;
@@ -30,8 +32,16 @@ export function LineItemsForm({
   itemLabel: string;
   submitLabel: string;
   children: ReactNode;
+  /** Itens já existentes (telas de edição). */
+  initialLines?: { itemId: string; quantity: string }[];
+  /** Limpa o formulário após sucesso (false em telas de edição). */
+  resetOnSuccess?: boolean;
 }) {
-  const [lines, setLines] = useState<Line[]>([{ key: 0, itemId: "", quantity: "" }]);
+  const [lines, setLines] = useState<Line[]>(() =>
+    initialLines?.length
+      ? initialLines.map((l, i) => ({ key: i, ...l }))
+      : [{ key: 0, itemId: "", quantity: "" }],
+  );
   const [result, setResult] = useState<ActionResult | null>(null);
   const [pending, startTransition] = useTransition();
 
@@ -52,7 +62,7 @@ export function LineItemsForm({
     startTransition(async () => {
       const res = await action({ ...header, orgSlug, items });
       setResult(res);
-      if (res.ok) {
+      if (res.ok && resetOnSuccess) {
         form.reset();
         setLines([{ key: Date.now(), itemId: "", quantity: "" }]);
       }

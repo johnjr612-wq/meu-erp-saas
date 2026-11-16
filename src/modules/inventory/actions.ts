@@ -5,9 +5,19 @@ import {
   createFormulaSchema,
   createProductionOrderSchema,
   manualMovementSchema,
+  formulaIdSchema,
   productionOrderIdSchema,
+  updateFormulaSchema,
 } from "./schemas";
-import { completeProductionOrder, createFormula, createProductionOrder, registerStockMovement } from "./service";
+import {
+  cancelProductionOrder,
+  completeProductionOrder,
+  createFormula,
+  createProductionOrder,
+  deleteFormula,
+  registerStockMovement,
+  updateFormula,
+} from "./service";
 
 export const registerMovementAction = createAction({
   schema: manualMovementSchema,
@@ -51,4 +61,32 @@ export const createFormulaAction = createAction({
     const formula = await createFormula(db, ctx, input);
     return { id: formula.id };
   },
+});
+
+export const updateFormulaAction = createAction({
+  schema: updateFormulaSchema,
+  permission: "production:write",
+  revalidate: "/estoque",
+  successMessage: "Fórmula atualizada.",
+  handler: async ({ ctx, db, input }) => {
+    const formula = await updateFormula(db, ctx, input);
+    return { id: formula.id };
+  },
+});
+
+export const deleteFormulaAction = createAction({
+  schema: formulaIdSchema,
+  permission: "production:write",
+  revalidate: "/estoque",
+  redirectTo: "/estoque",
+  successMessage: "Fórmula excluída.",
+  handler: ({ ctx, db, input }) => deleteFormula(db, ctx, input.formulaId),
+});
+
+export const cancelProductionOrderAction = createAction({
+  schema: productionOrderIdSchema,
+  permission: "production:write",
+  revalidate: "/estoque",
+  successMessage: "Ordem de produção cancelada.",
+  handler: ({ ctx, db, input }) => cancelProductionOrder(db, ctx, input.productionOrderId),
 });
