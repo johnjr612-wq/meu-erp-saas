@@ -4,6 +4,13 @@
  */
 import "dotenv/config";
 import assert from "node:assert/strict";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
+import { isValidCpfOrCnpj } from "@/lib/document";
+import { processAsaasWebhook } from "@/modules/billing/asaas";
+import { __test as asaasTest, AsaasNotConfiguredError } from "@/modules/billing/asaas-client";
+import { effectivePlan } from "@/modules/billing/plans";
+import { assertPlanLimit, cancelSubscription, subscribeToPlan } from "@/modules/billing/service";
 import { prisma, tenantDb, TenantIsolationError } from "@/lib/db";
 import type { OrgContext } from "@/lib/session";
 import { DomainError } from "@/lib/errors";
@@ -288,6 +295,166 @@ async function main() {
     const audit = await dbA.auditLog.findMany({ where: { entityId: op.id }, orderBy: { createdAt: "asc" } });
     assert.deepEqual(audit.map((a) => a.action), ["ACCEPT_INVITE", "CHANGE_ROLE", "REMOVE"]);
   });
+
+  // ---- Assinatura (Asaas mockado via HTTP local) ----
+  type Call = { method: string; path: string; token: string | undefined; body: Record<string, unknown> | null };
+  const calls: Call[] = [];
+  let subSeq = 0;
+  const readBody = (req: IncomingMessage) =>
+    new Promise<string>((resolve) => {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => resolve(data));
+    });
+  const mock = createServer(async (req, res) => {
+    const raw = await readBody(req);
+    const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+    const path = req.url ?? "";
+    calls.push({ method: req.method ?? "", path, token: req.headers["access_token"] as string | undefined, body });
+    const send = (status: number, json: unknown) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(json));
+    };
+    if (body?.cpfCnpj === "00000000000") return send(400, { errors: [{ code: "invalid_cpfCnpj", description: "O CPF/CNPJ informado é inválido." }] });
+    if (req.method === "POST" && path === "/customers") return send(200, { id: `cus_${run}` });
+    if (req.method === "PUT" && path.startsWith("/customers/")) return send(200, { id: path.split("/")[2] });
+    if (req.method === "POST" && path === "/subscriptions") return send(200, { id: `sub_${run}_${++subSeq}`, status: "ACTIVE" });
+    if (req.method === "PUT" && path.startsWith("/subscriptions/")) return send(200, { id: path.split("/")[2] });
+    if (req.method === "DELETE" && path.startsWith("/subscriptions/")) return send(200, { deleted: true });
+    if (req.method === "GET" && path.includes("/payments")) {
+      return send(200, {
+        data: [
+          { id: "pay_2", status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/pay_2", dueDate: "2026-12-16", value: 99 },
+          { id: "pay_1", status: "PENDING", invoiceUrl: "https://sandbox.asaas.com/i/pay_1", dueDate: "2026-11-16", value: 99 },
+        ],
+      });
+    }
+    send(404, { errors: [{ description: "rota não mockada" }] });
+  });
+  await new Promise<void>((r) => mock.listen(0, "127.0.0.1", r));
+  const savedEnv = { url: process.env.ASAAS_API_URL, key: process.env.ASAAS_API_KEY };
+  process.env.ASAAS_API_URL = `http://127.0.0.1:${(mock.address() as AddressInfo).port}`;
+  process.env.ASAAS_API_KEY = "test-key";
+
+  try {
+    await step("cobrança: CPF/CNPJ com dígito verificador e centavos→reais sem erro de arredondamento", () => {
+      assert.ok(isValidCpfOrCnpj("529.982.247-25"));
+      assert.ok(isValidCpfOrCnpj("11.222.333/0001-81"));
+      assert.ok(!isValidCpfOrCnpj("529.982.247-26"));
+      assert.ok(!isValidCpfOrCnpj("11111111111"));
+      assert.equal(asaasTest.centsToReais(9900), 99);
+      assert.equal(asaasTest.centsToReais(24990), 249.9);
+      assert.equal(asaasTest.centsToReais(5), 0.05);
+    });
+
+    await step("cobrança: plano efetivo mantém o pago até o fim do período após cancelar", () => {
+      const future = new Date(Date.now() + 86_400_000);
+      const past = new Date(Date.now() - 1000);
+      assert.equal(effectivePlan({ plan: "PRO", subscriptionStatus: "CANCELED", currentPeriodEnd: future }), "PRO");
+      assert.equal(effectivePlan({ plan: "PRO", subscriptionStatus: "CANCELED", currentPeriodEnd: past }), "FREE");
+      assert.equal(effectivePlan({ plan: "STARTER", subscriptionStatus: "PAST_DUE", currentPeriodEnd: past }), "STARTER");
+    });
+
+    const C = await makeOrg("c");
+    await prisma.organization.update({ where: { id: C.organizationId }, data: { plan: "FREE" } });
+    const orgC = () => prisma.organization.findUniqueOrThrow({ where: { id: C.organizationId } });
+    const webhook = (id: string, event: string, extra: Record<string, unknown>) =>
+      processAsaasWebhook({ id: `evt_${run}_${id}`, event, ...extra } as Parameters<typeof processAsaasWebhook>[0]);
+    const payment = (subscription: string) => ({
+      payment: { id: "pay_1", customer: `cus_${run}`, subscription, value: 99, dueDate: "2026-11-16", externalReference: "plan:STARTER" },
+    });
+
+    let firstSub = "";
+    await step("cobrança: assinar cria cliente + assinatura e devolve a fatura mais antiga; plano só muda após pagar", async () => {
+      const { paymentUrl } = await subscribeToPlan(C, { plan: "STARTER", cpfCnpj: "52998224725" });
+      assert.equal(paymentUrl, "https://sandbox.asaas.com/i/pay_1");
+      const customerCall = calls.find((c) => c.method === "POST" && c.path === "/customers")!;
+      assert.equal(customerCall.token, "test-key");
+      assert.equal(customerCall.body?.cpfCnpj, "52998224725");
+      const subCall = calls.find((c) => c.method === "POST" && c.path === "/subscriptions")!;
+      assert.equal(subCall.body?.value, 99);
+      assert.equal(subCall.body?.billingType, "UNDEFINED");
+      assert.equal(subCall.body?.cycle, "MONTHLY");
+      const org = await orgC();
+      firstSub = org.asaasSubscriptionId!;
+      assert.equal(org.plan, "FREE");
+      assert.equal(org.pendingPlan, "STARTER");
+      assert.equal(org.asaasCustomerId, `cus_${run}`);
+    });
+
+    await step("webhook: pagamento confirmado ativa o plano; evento repetido é ignorado", async () => {
+      assert.equal(await webhook("1", "PAYMENT_CONFIRMED", payment(firstSub)), "processed");
+      assert.equal(await webhook("1", "PAYMENT_CONFIRMED", payment(firstSub)), "duplicate");
+      const org = await orgC();
+      assert.equal(org.plan, "STARTER");
+      assert.equal(org.subscriptionStatus, "ACTIVE");
+      assert.equal(org.pendingPlan, null);
+      assert.equal(org.currentPeriodEnd?.toISOString().slice(0, 10), "2026-12-16");
+    });
+
+    await step("cobrança: upgrade altera a assinatura existente (sem criar outra) e aguarda pagamento", async () => {
+      const before = calls.filter((c) => c.method === "POST" && c.path === "/subscriptions").length;
+      await subscribeToPlan(C, { plan: "PRO", cpfCnpj: "52998224725" });
+      assert.equal(calls.filter((c) => c.method === "POST" && c.path === "/subscriptions").length, before);
+      const put = calls.filter((c) => c.method === "PUT" && c.path === `/subscriptions/${firstSub}`).at(-1)!;
+      assert.equal(put.body?.value, 249);
+      assert.equal(put.body?.updatePendingPayments, true);
+      const org = await orgC();
+      assert.equal(org.plan, "STARTER");
+      assert.equal(org.pendingPlan, "PRO");
+    });
+
+    await step("webhook: evento de assinatura antiga não altera a org", async () => {
+      assert.equal(await webhook("2", "PAYMENT_OVERDUE", payment("sub_antiga")), "ignored");
+      assert.equal((await orgC()).subscriptionStatus, "ACTIVE");
+    });
+
+    await step("webhook: atraso bloqueia novos cadastros; pagamento libera e aplica o upgrade", async () => {
+      await webhook("3", "PAYMENT_OVERDUE", payment(firstSub));
+      assert.equal((await orgC()).subscriptionStatus, "PAST_DUE");
+      const dbC = tenantDb(C.organizationId);
+      await assert.rejects(dbC.$transaction((tx) => assertPlanLimit(tx, C, "products")), /Pagamento em atraso/);
+      await webhook("4", "PAYMENT_RECEIVED", { payment: { ...payment(firstSub).payment, dueDate: "2026-12-16" } });
+      const org = await orgC();
+      assert.equal(org.subscriptionStatus, "ACTIVE");
+      assert.equal(org.plan, "PRO");
+      assert.equal(org.currentPeriodEnd?.toISOString().slice(0, 10), "2027-01-16");
+      await dbC.$transaction((tx) => assertPlanLimit(tx, C, "products"));
+    });
+
+    await step("cobrança: cancelar mantém o plano até o fim do período e depois aplica limites do Grátis", async () => {
+      await cancelSubscription(C);
+      assert.ok(calls.some((c) => c.method === "DELETE" && c.path === `/subscriptions/${firstSub}`));
+      let org = await orgC();
+      assert.equal(org.subscriptionStatus, "CANCELED");
+      assert.equal(effectivePlan(org), "PRO");
+      await assert.rejects(cancelSubscription(C), /Não há assinatura ativa/);
+
+      await prisma.organization.update({ where: { id: C.organizationId }, data: { currentPeriodEnd: new Date(Date.now() - 1000) } });
+      org = await orgC();
+      assert.equal(effectivePlan(org), "FREE");
+      const dbC = tenantDb(C.organizationId);
+      await assert.rejects(dbC.$transaction((tx) => assertPlanLimit(tx, C, "members")), /Limite do plano Grátis/);
+    });
+
+    await step("cobrança: reassinar após cancelar cria nova assinatura", async () => {
+      await subscribeToPlan(C, { plan: "STARTER", cpfCnpj: "52998224725" });
+      const org = await orgC();
+      assert.notEqual(org.asaasSubscriptionId, firstSub);
+      assert.equal(org.pendingPlan, "STARTER");
+    });
+
+    await step("cobrança: erro de validação do Asaas vira mensagem legível; sem chave, erro claro", async () => {
+      const D = await makeOrg("d");
+      await assert.rejects(subscribeToPlan(D, { plan: "STARTER", cpfCnpj: "00000000000" }), /CPF\/CNPJ informado é inválido/);
+      delete process.env.ASAAS_API_KEY;
+      await assert.rejects(subscribeToPlan(D, { plan: "STARTER", cpfCnpj: "52998224725" }), AsaasNotConfiguredError);
+    });
+  } finally {
+    mock.close();
+    process.env.ASAAS_API_URL = savedEnv.url;
+    process.env.ASAAS_API_KEY = savedEnv.key;
+  }
 
   console.log(`\n${passed} verificações passaram.`);
 }

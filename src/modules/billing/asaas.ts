@@ -1,7 +1,8 @@
 import "server-only";
 import { z } from "zod";
 import { timingSafeEqual } from "node:crypto";
-import type { Plan, SubscriptionStatus } from "@/generated/prisma/enums";
+import type { Prisma } from "@/generated/prisma/client";
+import type { Plan } from "@/generated/prisma/enums";
 import { prisma } from "@/lib/db";
 
 /** Payload mínimo dos webhooks de cobrança do Asaas que nos interessam. */
@@ -72,38 +73,41 @@ export async function processAsaasWebhook(event: AsaasWebhook): Promise<"process
       : null;
 
     let result: "processed" | "ignored" = "ignored";
-    if (org) {
-      let status: SubscriptionStatus | null = null;
-      let plan: Plan | null = null;
-      let currentPeriodEnd: Date | undefined;
+    const eventSubscriptionId = event.payment?.subscription ?? event.subscription?.id ?? null;
+    // Eventos de uma assinatura antiga (trocada/cancelada) não mexem na org.
+    const isCurrentSubscription =
+      !eventSubscriptionId || !org?.asaasSubscriptionId || eventSubscriptionId === org.asaasSubscriptionId;
+
+    if (org && isCurrentSubscription) {
+      let data: Prisma.OrganizationUpdateInput | null = null;
 
       switch (event.event) {
         case "PAYMENT_CONFIRMED":
-        case "PAYMENT_RECEIVED":
-          status = "ACTIVE";
-          plan = planFromReference(event.payment?.externalReference);
-          currentPeriodEnd = addOneMonth(event.payment?.dueDate ? new Date(event.payment.dueDate) : new Date());
+        case "PAYMENT_RECEIVED": {
+          const paidUntil = addOneMonth(event.payment?.dueDate ? new Date(`${event.payment.dueDate}T12:00:00Z`) : new Date());
+          data = {
+            subscriptionStatus: "ACTIVE",
+            plan: org.pendingPlan ?? planFromReference(event.payment?.externalReference) ?? org.plan,
+            pendingPlan: null,
+            // nunca encurta um período já pago (eventos podem chegar fora de ordem)
+            currentPeriodEnd:
+              org.currentPeriodEnd && org.currentPeriodEnd > paidUntil ? org.currentPeriodEnd : paidUntil,
+          };
           break;
+        }
         case "PAYMENT_OVERDUE":
-          status = "PAST_DUE";
+          // Só quem já pagava fica "em atraso". Quem nunca pagou a 1ª fatura segue no plano atual.
+          if (org.subscriptionStatus === "ACTIVE") data = { subscriptionStatus: "PAST_DUE" };
           break;
         case "SUBSCRIPTION_DELETED":
         case "SUBSCRIPTION_INACTIVATED":
-          status = "CANCELED";
-          plan = "FREE";
+          // Mantém o plano até currentPeriodEnd (ver effectivePlan).
+          data = { subscriptionStatus: "CANCELED", pendingPlan: null };
           break;
       }
 
-      if (status) {
-        await tx.organization.update({
-          where: { id: org.id },
-          data: {
-            subscriptionStatus: status,
-            ...(plan ? { plan } : {}),
-            ...(currentPeriodEnd ? { currentPeriodEnd } : {}),
-            ...(event.payment?.subscription ? { asaasSubscriptionId: event.payment.subscription } : {}),
-          },
-        });
+      if (data) {
+        await tx.organization.update({ where: { id: org.id }, data });
         result = "processed";
       }
     }

@@ -1,4 +1,4 @@
-import type { Plan } from "@/generated/prisma/enums";
+import type { Plan, SubscriptionStatus } from "@/generated/prisma/enums";
 
 export type PlanLimits = {
   members: number;
@@ -26,3 +26,19 @@ export const PLANS: Record<Plan, { name: string; priceCents: number; limits: Pla
     features: ["50 usuários", "Produtos ilimitados", "Pedidos ilimitados", "Conciliação bancária"],
   },
 };
+
+/**
+ * Plano que vale AGORA. Assinatura cancelada mantém o plano pago até o fim
+ * do período já pago (currentPeriodEnd); depois disso volta ao FREE.
+ * Calculado na hora — não depende de job agendado.
+ */
+export function effectivePlan(
+  org: { plan: Plan; subscriptionStatus: SubscriptionStatus; currentPeriodEnd: Date | null },
+  now: Date = new Date(),
+): Plan {
+  if (org.plan === "FREE") return "FREE";
+  if (org.subscriptionStatus === "CANCELED" && (!org.currentPeriodEnd || org.currentPeriodEnd <= now)) {
+    return "FREE";
+  }
+  return org.plan;
+}
