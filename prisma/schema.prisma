@@ -1,0 +1,484 @@
+// =============================================================================
+// ERP SaaS — modelagem multi-tenant
+// Regras: toda tabela de negócio tem organizationId; dinheiro em centavos (Int);
+// quantidades em Decimal(14,3); financeiro/fiscal com soft delete + auditoria.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+enum Role {
+  OWNER
+  ADMIN
+  FINANCIAL
+  OPERATOR
+}
+
+enum Plan {
+  FREE
+  STARTER
+  PRO
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum ProductType {
+  RAW_MATERIAL // matéria-prima (tensoativo, essência, corante...)
+  PACKAGING // embalagem (frasco, tampa, rótulo)
+  FINISHED_GOOD // produto acabado (detergente 500ml...)
+}
+
+enum UnitOfMeasure {
+  UN
+  KG
+  G
+  L
+  ML
+  CX
+}
+
+enum StockMovementType {
+  IN // entrada (compra)
+  OUT // saída (venda)
+  ADJUSTMENT // ajuste de inventário (+/-)
+  PRODUCTION_IN // produto acabado gerado pela produção
+  PRODUCTION_OUT // consumo de insumos pela produção
+}
+
+enum ProductionOrderStatus {
+  PLANNED
+  COMPLETED
+  CANCELED
+}
+
+enum SalesOrderStatus {
+  QUOTE // orçamento
+  CONFIRMED // pedido confirmado (baixa estoque + gera recebível)
+  CANCELED
+}
+
+enum FinancialEntryType {
+  RECEIVABLE
+  PAYABLE
+}
+
+enum FinancialEntryStatus {
+  OPEN
+  PARTIAL
+  PAID
+  CANCELED
+}
+
+enum PaymentMethod {
+  PIX
+  BOLETO
+  CASH
+  CREDIT_CARD
+  DEBIT_CARD
+  TRANSFER
+}
+
+// -----------------------------------------------------------------------------
+// Plataforma: usuários, organizações, membros, assinatura
+// -----------------------------------------------------------------------------
+
+model User {
+  id           String       @id @default(cuid())
+  name         String
+  email        String       @unique
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  memberships  Membership[]
+}
+
+model Organization {
+  id                  String             @id @default(cuid())
+  name                String
+  slug                String             @unique
+  document            String? // CNPJ
+  plan                Plan               @default(FREE)
+  subscriptionStatus  SubscriptionStatus @default(TRIALING)
+  asaasCustomerId     String?            @unique
+  asaasSubscriptionId String?            @unique
+  currentPeriodEnd    DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  memberships      Membership[]
+  customers        Customer[]
+  suppliers        Supplier[]
+  products         Product[]
+  stockMovements   StockMovement[]
+  formulas         Formula[]
+  formulaItems     FormulaItem[]
+  productionOrders ProductionOrder[]
+  salesOrders      SalesOrder[]
+  salesOrderItems  SalesOrderItem[]
+  bankAccounts     BankAccount[]
+  financialEntries FinancialEntry[]
+  payments         FinancialPayment[]
+  auditLogs        AuditLog[]
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String
+  role           Role         @default(OPERATOR)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+/// Idempotência de webhooks (Asaas, NF-e). Infraestrutura, não dado de negócio.
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  externalId  String
+  eventType   String
+  payload     Json
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@unique([provider, externalId])
+}
+
+// -----------------------------------------------------------------------------
+// Cadastros
+// -----------------------------------------------------------------------------
+
+model Customer {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  document       String? // CPF/CNPJ
+  email          String?
+  phone          String?
+  address        String?
+  city           String?
+  state          String?   @db.Char(2)
+  zipCode        String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  createdBy      String?
+  updatedBy      String?
+  deletedAt      DateTime?
+  deletedBy      String?
+
+  organization     Organization     @relation(fields: [organizationId], references: [id])
+  salesOrders      SalesOrder[]
+  financialEntries FinancialEntry[]
+
+  @@index([organizationId, name])
+  @@index([organizationId, document])
+}
+
+model Supplier {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  document       String?
+  email          String?
+  phone          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  createdBy      String?
+  updatedBy      String?
+  deletedAt      DateTime?
+  deletedBy      String?
+
+  organization     Organization     @relation(fields: [organizationId], references: [id])
+  financialEntries FinancialEntry[]
+
+  @@index([organizationId, name])
+}
+
+model Product {
+  id             String        @id @default(cuid())
+  organizationId String
+  sku            String
+  name           String
+  type           ProductType   @default(FINISHED_GOOD)
+  unit           UnitOfMeasure @default(UN)
+  priceCents     Int           @default(0) // preço de venda
+  costCents      Int           @default(0) // custo médio unitário
+  stockQuantity  Decimal       @default(0) @db.Decimal(14, 3) // saldo (derivado do ledger)
+  minStock       Decimal       @default(0) @db.Decimal(14, 3)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  createdBy      String?
+  updatedBy      String?
+  deletedAt      DateTime?
+  deletedBy      String?
+
+  organization     Organization      @relation(fields: [organizationId], references: [id])
+  stockMovements   StockMovement[]
+  formulas         Formula[]         @relation("FormulaOutput")
+  usedInFormulas   FormulaItem[]     @relation("FormulaComponent")
+  salesOrderItems  SalesOrderItem[]
+  productionOrders ProductionOrder[]
+
+  @@unique([organizationId, sku])
+  @@index([organizationId, type])
+}
+
+// -----------------------------------------------------------------------------
+// Estoque (ledger imutável — nunca editar/deletar movimentações)
+// -----------------------------------------------------------------------------
+
+model StockMovement {
+  id             String            @id @default(cuid())
+  organizationId String
+  productId      String
+  type           StockMovementType
+  /// Quantidade com sinal: positiva = entrada, negativa = saída.
+  quantity       Decimal           @db.Decimal(14, 3)
+  balanceAfter   Decimal           @db.Decimal(14, 3)
+  unitCostCents  Int?
+  lot            String?
+  reason         String?
+  referenceType  String? // "SalesOrder" | "ProductionOrder" | ...
+  referenceId    String?
+  createdAt      DateTime          @default(now())
+  createdBy      String
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  product      Product      @relation(fields: [productId], references: [id])
+
+  @@index([organizationId, productId, createdAt])
+  @@index([organizationId, referenceType, referenceId])
+}
+
+// -----------------------------------------------------------------------------
+// Produção (fórmulas / ordens de produção)
+// -----------------------------------------------------------------------------
+
+model Formula {
+  id             String    @id @default(cuid())
+  organizationId String
+  productId      String // produto acabado gerado
+  name           String
+  /// Quantidade de produto acabado produzida por 1 batelada da fórmula.
+  yieldQuantity  Decimal   @db.Decimal(14, 3)
+  instructions   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  createdBy      String?
+  updatedBy      String?
+  deletedAt      DateTime?
+
+  organization     Organization      @relation(fields: [organizationId], references: [id])
+  product          Product           @relation("FormulaOutput", fields: [productId], references: [id])
+  items            FormulaItem[]
+  productionOrders ProductionOrder[]
+
+  @@index([organizationId, productId])
+}
+
+model FormulaItem {
+  id             String  @id @default(cuid())
+  organizationId String
+  formulaId      String
+  componentId    String
+  /// Quantidade do insumo por batelada (yieldQuantity) da fórmula.
+  quantity       Decimal @db.Decimal(14, 3)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  formula      Formula      @relation(fields: [formulaId], references: [id], onDelete: Cascade)
+  component    Product      @relation("FormulaComponent", fields: [componentId], references: [id])
+
+  @@unique([formulaId, componentId])
+  @@index([organizationId])
+}
+
+model ProductionOrder {
+  id             String                @id @default(cuid())
+  organizationId String
+  number         Int
+  formulaId      String
+  productId      String
+  quantity       Decimal               @db.Decimal(14, 3)
+  lot            String
+  expiresAt      DateTime?
+  status         ProductionOrderStatus @default(PLANNED)
+  completedAt    DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  createdBy      String
+  updatedBy      String?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  formula      Formula      @relation(fields: [formulaId], references: [id])
+  product      Product      @relation(fields: [productId], references: [id])
+
+  @@unique([organizationId, number])
+  @@unique([organizationId, lot])
+}
+
+// -----------------------------------------------------------------------------
+// Vendas
+// -----------------------------------------------------------------------------
+
+model SalesOrder {
+  id             String           @id @default(cuid())
+  organizationId String
+  number         Int
+  customerId     String
+  status         SalesOrderStatus @default(QUOTE)
+  subtotalCents  Int              @default(0)
+  discountCents  Int              @default(0)
+  totalCents     Int              @default(0)
+  notes          String?
+  confirmedAt    DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  createdBy      String
+  updatedBy      String?
+  deletedAt      DateTime?
+  deletedBy      String?
+
+  organization     Organization     @relation(fields: [organizationId], references: [id])
+  customer         Customer         @relation(fields: [customerId], references: [id])
+  items            SalesOrderItem[]
+  financialEntries FinancialEntry[]
+
+  @@unique([organizationId, number])
+  @@index([organizationId, status, createdAt])
+}
+
+model SalesOrderItem {
+  id             String  @id @default(cuid())
+  organizationId String
+  salesOrderId   String
+  productId      String
+  quantity       Decimal @db.Decimal(14, 3)
+  unitPriceCents Int
+  totalCents     Int
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  salesOrder   SalesOrder   @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  product      Product      @relation(fields: [productId], references: [id])
+
+  @@index([organizationId, salesOrderId])
+}
+
+// -----------------------------------------------------------------------------
+// Financeiro (soft delete + auditoria obrigatórios)
+// -----------------------------------------------------------------------------
+
+model BankAccount {
+  id                  String    @id @default(cuid())
+  organizationId      String
+  name                String // "Caixa", "Banco do Brasil", "Asaas"...
+  openingBalanceCents Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  createdBy           String?
+  updatedBy           String?
+  deletedAt           DateTime?
+  deletedBy           String?
+
+  organization Organization       @relation(fields: [organizationId], references: [id])
+  payments     FinancialPayment[]
+
+  @@index([organizationId])
+}
+
+/// Título a pagar / a receber.
+model FinancialEntry {
+  id              String               @id @default(cuid())
+  organizationId  String
+  type            FinancialEntryType
+  status          FinancialEntryStatus @default(OPEN)
+  description     String
+  category        String?
+  amountCents     Int
+  paidAmountCents Int                  @default(0)
+  dueDate         DateTime             @db.Date
+  paidAt          DateTime?
+  customerId      String?
+  supplierId      String?
+  salesOrderId    String?
+  documentNumber  String? // nº da NF / boleto
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  createdBy       String
+  updatedBy       String?
+  deletedAt       DateTime?
+  deletedBy       String?
+
+  organization Organization       @relation(fields: [organizationId], references: [id])
+  customer     Customer?          @relation(fields: [customerId], references: [id])
+  supplier     Supplier?          @relation(fields: [supplierId], references: [id])
+  salesOrder   SalesOrder?        @relation(fields: [salesOrderId], references: [id])
+  payments     FinancialPayment[]
+
+  @@index([organizationId, type, status, dueDate])
+}
+
+/// Baixa (total ou parcial) de um título. Nunca deletar: estornar com reversedAt.
+model FinancialPayment {
+  id             String        @id @default(cuid())
+  organizationId String
+  entryId        String
+  bankAccountId  String
+  amountCents    Int
+  method         PaymentMethod
+  paidAt         DateTime
+  externalId     String? // id da transação no extrato/gateway (conciliação)
+  reconciledAt   DateTime?
+  reconciledBy   String?
+  reversedAt     DateTime?
+  reversedBy     String?
+  reversalReason String?
+  createdAt      DateTime      @default(now())
+  createdBy      String
+
+  organization Organization   @relation(fields: [organizationId], references: [id])
+  entry        FinancialEntry @relation(fields: [entryId], references: [id])
+  bankAccount  BankAccount    @relation(fields: [bankAccountId], references: [id])
+
+  @@index([organizationId, bankAccountId, paidAt])
+  @@index([organizationId, externalId])
+}
+
+// -----------------------------------------------------------------------------
+// Auditoria
+// -----------------------------------------------------------------------------
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  entity         String
+  entityId       String
+  action         String // CREATE | UPDATE | SOFT_DELETE | SETTLE | REVERSE | ...
+  before         Json?
+  after          Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, entity, entityId])
+  @@index([organizationId, createdAt])
+}
