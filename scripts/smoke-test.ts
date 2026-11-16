@@ -19,6 +19,7 @@ import { processAsaasWebhook } from "@/modules/billing/asaas";
 import { __test as asaasTest, AsaasNotConfiguredError } from "@/modules/billing/asaas-client";
 import { effectivePlan } from "@/modules/billing/plans";
 import { assertPlanLimit, cancelSubscription, subscribeToPlan } from "@/modules/billing/service";
+import { checkEnv } from "@/lib/env";
 import { centsCell, toCsv } from "@/modules/reports/csv";
 import { getCashFlow, getSalesReport, parsePeriod } from "@/modules/reports/service";
 import { prisma, tenantDb, TenantIsolationError } from "@/lib/db";
@@ -69,6 +70,18 @@ async function main() {
   const B = await makeOrg("b");
   const dbA = tenantDb(A.organizationId);
   const dbB = tenantDb(B.organizationId);
+
+  await step("config: obrigatórias derrubam produção; opcionais e sandbox viram aviso", () => {
+    const ok = { DATABASE_URL: "postgresql://x", AUTH_SECRET: "a".repeat(32) };
+    const prod = (extra: Record<string, string>) => checkEnv({ ...ok, NODE_ENV: "production", ...extra } as unknown as NodeJS.ProcessEnv);
+    assert.deepEqual(checkEnv({ ...ok, NODE_ENV: "development" } as unknown as NodeJS.ProcessEnv).errors, []);
+    assert.match(prod({}).errors.join(), /APP_URL/);
+    assert.match(prod({ AUTH_SECRET: "curto", APP_URL: "https://erp.x" }).errors.join(), /AUTH_SECRET/);
+    const r = prod({ APP_URL: "https://erp.x", ASAAS_API_URL: "https://api-sandbox.asaas.com/v3" });
+    assert.deepEqual(r.errors, []);
+    assert.match(r.warnings.join(), /SANDBOX/);
+    assert.match(r.warnings.join(), /Resend/);
+  });
 
   await step("dinheiro: parse BRL sem float", () => {
     assert.equal(parseBRLToCents("1.234,56"), 123456);

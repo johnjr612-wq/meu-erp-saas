@@ -2,6 +2,10 @@
 
 ERP multi-tenant para indústrias de produtos de limpeza: produção (fórmulas, OPs, lotes), estoque (ledger com custo médio), vendas e financeiro (baixas parciais, estorno, conciliação). Regras de arquitetura em [`CLAUDE.md`](./CLAUDE.md).
 
+## Colocar no ar
+
+Passo a passo (banco, hospedagem, e-mail e cobrança) em [`DEPLOY.md`](./DEPLOY.md).
+
 ## Rodando localmente
 
 ```bash
