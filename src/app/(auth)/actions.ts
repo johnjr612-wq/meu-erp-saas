@@ -9,7 +9,7 @@ import { prisma } from "@/lib/db";
 export type AuthFormState = { error?: string; fieldErrors?: Record<string, string[] | undefined> } | null;
 
 /** Slugs que colidem com rotas estáticas do app. */
-const RESERVED_SLUGS = new Set(["app", "api", "login", "registro", "recuperar-senha", "precos", "convite", "_next", "admin"]);
+const RESERVED_SLUGS = new Set(["app", "api", "login", "registro", "recuperar-senha", "precos", "convite", "redefinir-senha", "_next", "admin"]);
 
 const registerSchema = z
   .object({
