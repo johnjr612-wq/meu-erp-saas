@@ -21,6 +21,7 @@ if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 /** Modelos de negócio: possuem `organizationId` e são isolados por tenant. */
 const TENANT_MODELS = new Set([
+  "Invitation",
   "Customer",
   "Supplier",
   "Product",

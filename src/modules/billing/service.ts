@@ -28,9 +28,15 @@ export async function assertPlanLimit(tx: TenantTx, ctx: OrgContext, resource: k
       used = await tx.salesOrder.count({ where: { createdAt: { gte: start } } });
       break;
     }
-    case "members":
-      used = await prisma.membership.count({ where: { organizationId: ctx.organizationId } });
+    case "members": {
+      // membros atuais + convites ainda válidos (evita estourar o limite via convites)
+      const [members, pendingInvites] = await Promise.all([
+        prisma.membership.count({ where: { organizationId: ctx.organizationId } }),
+        tx.invitation.count({ where: { acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } } }),
+      ]);
+      used = members + pendingInvites;
       break;
+    }
   }
 
   if (used >= limit) {
