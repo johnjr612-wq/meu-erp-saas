@@ -23,6 +23,7 @@ export default async function OrgLayout({
     can(ctx.role, "sales:read") && "vendas",
     can(ctx.role, "inventory:read") && "estoque",
     can(ctx.role, "financial:read") && "financeiro",
+    (can(ctx.role, "financial:read") || can(ctx.role, "sales:read")) && "relatorios",
     (can(ctx.role, "config:members") || can(ctx.role, "billing:manage")) && "config",
   ].filter((v): v is string => typeof v === "string");
 

@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { isValidCpfOrCnpj } from "@/lib/document";
+import { centsCell, toCsv } from "@/modules/reports/csv";
+import { getCashFlow, getSalesReport, parsePeriod } from "@/modules/reports/service";
 import { processAsaasWebhook } from "@/modules/billing/asaas";
 import { __test as asaasTest, AsaasNotConfiguredError } from "@/modules/billing/asaas-client";
 import { effectivePlan } from "@/modules/billing/plans";
@@ -371,6 +373,92 @@ async function main() {
     assert.equal(await prisma.membership.findUnique({ where: { id: op.id } }), null);
     const audit = await dbA.auditLog.findMany({ where: { entityId: op.id }, orderBy: { createdAt: "asc" } });
     assert.deepEqual(audit.map((a) => a.action), ["ACCEPT_INVITE", "CHANGE_ROLE", "REMOVE"]);
+  });
+
+  // ---- Relatórios ----
+  await step("relatórios: período padrão, inversão e limite de 1 ano; CSV no padrão Excel BR", () => {
+    const now = new Date("2026-02-10T15:00:00Z");
+    assert.deepEqual(parsePeriod(undefined, undefined, now), { from: "2026-02-01", to: "2026-02-28" });
+    assert.deepEqual(parsePeriod("2026-03-10", "2026-03-01", now), { from: "2026-03-01", to: "2026-03-10" });
+    assert.deepEqual(parsePeriod("lixo", "2026-02-05", now), { from: "2026-02-01", to: "2026-02-05" });
+    assert.equal(parsePeriod("2020-01-01", "2026-01-01", now).to, "2020-12-31");
+    assert.equal(centsCell(-123456), "-1234,56");
+    assert.equal(centsCell(5), "0,05");
+    assert.equal(toCsv(["a", "b"], [['x;y', 'diz "oi"']]), '\uFEFFa;b\r\n"x;y";"diz ""oi"""\r\n');
+  });
+
+  await step("relatórios: fluxo de caixa com saldo inicial, realizado, previsto, estorno e vencidos", async () => {
+    const E = await makeOrg("e");
+    const dbE = tenantDb(E.organizationId);
+    const bank = await dbE.bankAccount.create({ data: { organizationId: E.organizationId, name: "Banco", openingBalanceCents: 100000 } });
+    const pay = (entryId: string, amountCents: number, day: string) =>
+      settleEntry(dbE, E, { entryId, bankAccountId: bank.id, amountCents, method: "PIX", paidAt: new Date(day) });
+
+    const r1 = await createEntry(dbE, E, { type: "RECEIVABLE", description: "R1", amountCents: 10000, dueDate: new Date("2026-10-20") });
+    await pay(r1.id, 4000, "2026-10-25"); // antes do período → saldo inicial
+    await pay(r1.id, 6000, "2026-11-05");
+    const p1 = await createEntry(dbE, E, { type: "PAYABLE", description: "P1", amountCents: 3000, dueDate: new Date("2026-11-10") });
+    await pay(p1.id, 3000, "2026-11-10");
+    const p2 = await createEntry(dbE, E, { type: "PAYABLE", description: "P2", amountCents: 2000, dueDate: new Date("2026-11-12") });
+    const p2pay = await pay(p2.id, 2000, "2026-11-12");
+    await reversePayment(dbE, E, p2pay.id, "devolvido"); // estorno: volta a ser previsto
+    await createEntry(dbE, E, { type: "RECEIVABLE", description: "R2", amountCents: 5000, dueDate: new Date("2026-11-20") });
+    await createEntry(dbE, E, { type: "RECEIVABLE", description: "R3", amountCents: 700, dueDate: new Date("2026-10-01") });
+
+    const cf = await getCashFlow(dbE, { from: "2026-11-01", to: "2026-11-30" }, "2026-11-16");
+    assert.equal(cf.openingBalanceCents, 104000);
+    assert.deepEqual(
+      cf.rows.map((r) => [r.day, r.inCents, r.outCents, r.expectedInCents, r.expectedOutCents, r.balanceCents, r.projectedBalanceCents]),
+      [
+        ["2026-11-05", 6000, 0, 0, 0, 110000, 110000],
+        ["2026-11-10", 0, 3000, 0, 0, 107000, 107000],
+        ["2026-11-12", 0, 0, 0, 2000, 107000, 105000],
+        ["2026-11-20", 0, 0, 5000, 0, 107000, 110000],
+      ],
+    );
+    assert.equal(cf.totals.closingBalanceCents, 107000);
+    assert.equal(cf.totals.projectedClosingCents, 110000);
+    assert.deepEqual(cf.overdue.receivable, { count: 1, cents: 700 });
+    assert.deepEqual(cf.overdue.payable, { count: 0, cents: 0 });
+
+    // isolamento: outra org não enxerga nada disso
+    const other = await getCashFlow(tenantDb(B.organizationId), { from: "2026-11-01", to: "2026-11-30" }, "2026-11-16");
+    assert.equal(other.rows.some((r) => r.inCents === 6000), false);
+  });
+
+  await step("relatórios: vendas por cliente e produto só com pedidos confirmados no período", async () => {
+    const F = await makeOrg("f");
+    const dbF = tenantDb(F.organizationId);
+    const mk = (sku: string, priceCents: number) =>
+      dbF.product.create({ data: { organizationId: F.organizationId, sku, name: sku, type: "FINISHED_GOOD", unit: "UN", priceCents } });
+    const [pP, pQ] = [await mk("P", 1000), await mk("Q", 250)];
+    await dbF.$transaction(async (tx) => {
+      await registerStockMovement(tx, F, { productId: pP.id, type: "IN", quantity: "100" });
+      await registerStockMovement(tx, F, { productId: pQ.id, type: "IN", quantity: "100" });
+    });
+    const [cx, cy] = [
+      await dbF.customer.create({ data: { organizationId: F.organizationId, name: "X" } }),
+      await dbF.customer.create({ data: { organizationId: F.organizationId, name: "Y" } }),
+    ];
+    const due = new Date("2026-12-31");
+    const o1 = await createSalesOrder(dbF, F, { customerId: cx.id, discountCents: 500, items: [{ productId: pP.id, quantity: "3" }] });
+    await confirmSalesOrder(dbF, F, o1.id, due);
+    const o2 = await createSalesOrder(dbF, F, {
+      customerId: cy.id,
+      discountCents: 0,
+      items: [{ productId: pQ.id, quantity: "4" }, { productId: pP.id, quantity: "1" }],
+    });
+    await confirmSalesOrder(dbF, F, o2.id, due);
+    await createSalesOrder(dbF, F, { customerId: cx.id, discountCents: 0, items: [{ productId: pP.id, quantity: "50" }] }); // orçamento: não conta
+
+    const rep = await getSalesReport(dbF, parsePeriod(undefined, undefined));
+    assert.deepEqual(rep.totals, { orders: 2, grossCents: 5000, discountCents: 500, netCents: 4500, averageTicketCents: 2250 });
+    assert.deepEqual(rep.byCustomer.map((c) => [c.name, c.orders, c.totalCents]), [["X", 1, 2500], ["Y", 1, 2000]]);
+    assert.deepEqual(rep.byProduct.map((p) => [p.sku, p.quantity.toString(), p.grossCents]), [["P", "4", 4000], ["Q", "4", 1000]]);
+    assert.equal(Math.round(rep.byProduct[0].sharePct), 80);
+
+    const lastYear = await getSalesReport(dbF, { from: "2025-01-01", to: "2025-12-31" });
+    assert.equal(lastYear.totals.orders, 0);
   });
 
   // ---- Assinatura (Asaas mockado via HTTP local) ----
