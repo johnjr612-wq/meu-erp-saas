@@ -7,6 +7,14 @@ import { prisma } from "@/lib/db";
 declare module "next-auth" {
   interface Session {
     user: { id: string } & DefaultSession["user"];
+    /** Momento do login (ms). Usado para derrubar sessões após troca de senha. */
+    authAt?: number;
+  }
+}
+
+declare module "@auth/core/jwt" {
+  interface JWT {
+    authAt?: number;
   }
 }
 
@@ -37,11 +45,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   ],
   callbacks: {
     jwt({ token, user }) {
-      if (user?.id) token.sub = user.id;
+      // `user` só existe no login: o carimbo authAt não muda quando o JWT é renovado.
+      if (user?.id) {
+        token.sub = user.id;
+        token.authAt = Date.now();
+      }
       return token;
     },
     session({ session, token }) {
       if (token.sub) session.user.id = token.sub;
+      session.authAt = token.authAt;
       return session;
     },
   },

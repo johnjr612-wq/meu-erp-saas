@@ -46,3 +46,12 @@ Configuração:
 1. `ASAAS_API_KEY` (sandbox ou produção) e `ASAAS_API_URL` (`https://api-sandbox.asaas.com/v3` ou `https://api.asaas.com/v3`).
 2. No painel do Asaas, crie um webhook para `https://SEU_DOMINIO/api/webhooks/asaas` com os eventos de cobrança e
    assinatura, e defina um token igual a `ASAAS_WEBHOOK_TOKEN`.
+
+## Recuperação de senha
+
+Em **/recuperar-senha** o usuário informa o e-mail e recebe um link `/redefinir-senha/<token>` (uso único, 1 hora,
+só o hash é salvo; máximo de 3 pedidos por hora). A resposta é sempre a mesma, exista ou não a conta. Ao salvar a nova
+senha, todas as sessões abertas daquela conta são encerradas.
+
+O envio usa o Resend (`RESEND_API_KEY` + `EMAIL_FROM`, com domínio verificado no Resend). Sem essas variáveis, em
+desenvolvimento o link aparece no log do servidor; em produção o erro de configuração é registrado no log.

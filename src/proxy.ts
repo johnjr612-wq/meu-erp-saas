@@ -6,7 +6,7 @@ import { NextResponse, type NextRequest } from "next/server";
  * em `requireOrgContext` (layouts/páginas) e em `createAction` (mutações).
  */
 const PUBLIC_PATHS = ["/", "/login", "/registro", "/recuperar-senha", "/precos"];
-const PUBLIC_PREFIXES = ["/convite/"];
+const PUBLIC_PREFIXES = ["/convite/", "/redefinir-senha/"];
 const SESSION_COOKIES = ["authjs.session-token", "__Secure-authjs.session-token"];
 
 export function proxy(request: NextRequest) {

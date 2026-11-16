@@ -7,6 +7,14 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { isValidCpfOrCnpj } from "@/lib/document";
+import bcrypt from "bcryptjs";
+import {
+  getResetTokenStatus,
+  isSessionRevoked,
+  MAX_RESET_REQUESTS_PER_HOUR,
+  requestPasswordReset,
+  resetPassword,
+} from "@/modules/account/service";
 import { processAsaasWebhook } from "@/modules/billing/asaas";
 import { __test as asaasTest, AsaasNotConfiguredError } from "@/modules/billing/asaas-client";
 import { effectivePlan } from "@/modules/billing/plans";
@@ -292,6 +300,55 @@ async function main() {
     await assert.rejects(updateEntry(dbA, A, { ...base, amountCents: 9000 }), /pagos ou cancelados não podem ser editados/);
     const actions = (await dbA.auditLog.findMany({ where: { entityId: receivableId, action: "UPDATE" } })).length;
     assert.equal(actions, 2);
+  });
+
+  // ---- Recuperação de senha ----
+  await step("senha: e-mail inexistente não gera link nem erro (não revela cadastro)", async () => {
+    const r = await requestPasswordReset(`ninguem-${run}@test.local`, "http://app");
+    assert.equal(r.resetUrl, null);
+  });
+
+  await step("senha: link é de uso único, só o hash é salvo e um novo pedido invalida o anterior", async () => {
+    const u = await prisma.user.create({
+      data: { name: "Reset", email: `reset-${run}@test.local`, passwordHash: await bcrypt.hash("senha-antiga-1", 4) },
+    });
+    const first = (await requestPasswordReset(u.email, "http://app")).resetUrl!;
+    const second = (await requestPasswordReset(u.email, "http://app")).resetUrl!;
+    const t1 = first.split("/redefinir-senha/")[1];
+    const t2 = second.split("/redefinir-senha/")[1];
+    assert.equal(await getResetTokenStatus(t1), "used");
+    assert.equal(await getResetTokenStatus(t2), "valid");
+    assert.equal(await prisma.passwordResetToken.count({ where: { tokenHash: t2 } }), 0); // token puro não está no banco
+
+    await assert.rejects(resetPassword(t1, "nova-senha-123"), /expirou ou já foi usado/);
+    const before = new Date();
+    await resetPassword(t2, "nova-senha-123");
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+    assert.ok(await bcrypt.compare("nova-senha-123", after.passwordHash));
+    assert.ok(!(await bcrypt.compare("senha-antiga-1", after.passwordHash)));
+    assert.ok(after.passwordChangedAt && after.passwordChangedAt >= before);
+    await assert.rejects(resetPassword(t2, "outra-senha-123"), /expirou ou já foi usado/);
+  });
+
+  await step("senha: link expirado é recusado; limite de pedidos por hora", async () => {
+    const u = await prisma.user.create({ data: { name: "Exp", email: `exp-${run}@test.local`, passwordHash: "x" } });
+    const url = (await requestPasswordReset(u.email, "http://app")).resetUrl!;
+    const token = url.split("/redefinir-senha/")[1];
+    await prisma.passwordResetToken.updateMany({ where: { userId: u.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    assert.equal(await getResetTokenStatus(token), "expired");
+    await assert.rejects(resetPassword(token, "nova-senha-123"), /expirou/);
+
+    for (let i = 1; i < MAX_RESET_REQUESTS_PER_HOUR; i++) await requestPasswordReset(u.email, "http://app");
+    assert.equal((await requestPasswordReset(u.email, "http://app")).resetUrl, null);
+    assert.equal(await prisma.passwordResetToken.count({ where: { userId: u.id } }), MAX_RESET_REQUESTS_PER_HOUR);
+  });
+
+  await step("senha: sessões abertas antes da troca de senha são revogadas", () => {
+    const changed = new Date("2026-11-16T12:00:00Z");
+    assert.equal(isSessionRevoked(changed.getTime() - 1, changed), true);
+    assert.equal(isSessionRevoked(changed.getTime() + 1, changed), false);
+    assert.equal(isSessionRevoked(undefined, changed), true);
+    assert.equal(isSessionRevoked(undefined, null), false);
   });
 
   // ---- Convites e membros ----

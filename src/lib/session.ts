@@ -3,6 +3,7 @@ import { cache } from "react";
 import { notFound, redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
+import { isSessionRevoked } from "@/modules/account/service";
 import type { Role } from "@/generated/prisma/enums";
 
 export type OrgContext = {
@@ -20,10 +21,16 @@ export class UnauthorizedError extends Error {
   }
 }
 
-/** Retorna o userId da sessão ou null. */
+/** Retorna o userId da sessão válida ou null. */
 export const getSessionUserId = cache(async (): Promise<string | null> => {
   const session = await auth();
-  return session?.user?.id ?? null;
+  const userId = session?.user?.id;
+  if (!userId) return null;
+
+  // Sessão vale só se o usuário existe e não trocou a senha depois do login.
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { passwordChangedAt: true } });
+  if (!user || isSessionRevoked(session.authAt, user.passwordChangedAt)) return null;
+  return userId;
 });
 
 /**

@@ -12,7 +12,8 @@ export async function sendMail(mail: Mail): Promise<boolean> {
   if (!apiKey || !from) return false;
 
   try {
-    const res = await fetch("https://api.resend.com/emails", {
+    const baseUrl = process.env.RESEND_API_URL ?? "https://api.resend.com";
+    const res = await fetch(`${baseUrl.replace(/\/$/, "")}/emails`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ from, to: [mail.to], subject: mail.subject, html: mail.html, text: mail.text }),
