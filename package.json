@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx --conditions=react-server prisma/seed.ts",
-    "test:smoke": "tsx --conditions=react-server --tsconfig tsconfig.json scripts/smoke-test.ts"
+    "test:smoke": "tsx --conditions=react-server --tsconfig tsconfig.json scripts/smoke-test.ts",
+    "vercel-build": "prisma migrate deploy && next build",
+    "db:deploy": "prisma migrate deploy"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.1",
