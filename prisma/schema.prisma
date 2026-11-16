@@ -121,6 +121,7 @@ model Organization {
   updatedAt           DateTime           @updatedAt
 
   memberships      Membership[]
+  invitations      Invitation[]
   customers        Customer[]
   suppliers        Supplier[]
   products         Product[]
@@ -148,6 +149,26 @@ model Membership {
 
   @@unique([organizationId, userId])
   @@index([userId])
+}
+
+/// Convite para entrar na organização. Guardamos só o hash do token.
+model Invitation {
+  id             String    @id @default(cuid())
+  organizationId String
+  email          String
+  role           Role
+  tokenHash      String    @unique
+  invitedBy      String
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  acceptedBy     String?
+  revokedAt      DateTime?
+  revokedBy      String?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, email])
 }
 
 /// Idempotência de webhooks (Asaas, NF-e). Infraestrutura, não dado de negócio.

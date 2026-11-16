@@ -11,6 +11,14 @@ import { parseBRLToCents } from "@/lib/money";
 import { completeProductionOrder, createFormula, createProductionOrder, registerStockMovement } from "@/modules/inventory/service";
 import { confirmSalesOrder, createSalesOrder } from "@/modules/sales/service";
 import { cancelEntry, createEntry, getBankBalances, reversePayment, settleEntry } from "@/modules/financial/service";
+import {
+  acceptInvitation,
+  changeMemberRole,
+  createInvitation,
+  getInvitationByToken,
+  removeMember,
+  revokeInvitation,
+} from "@/modules/members/service";
 
 const run = Date.now().toString(36);
 let passed = 0;
@@ -200,6 +208,85 @@ async function main() {
     assert.equal(raw.deletedBy, A.userId);
     const logs = await dbA.auditLog.findMany({ where: { entityId: entry.id } });
     assert.deepEqual(logs.map((l) => l.action).sort(), ["CREATE", "SOFT_DELETE"]);
+  });
+
+  // ---- Convites e membros ----
+  const tokenOf = (url: string) => url.split("/convite/")[1];
+  const baseUrl = "http://localhost:3000";
+  const newUser = (prefix: string) =>
+    prisma.user.create({ data: { name: prefix, email: `${prefix}-${run}@test.local`, passwordHash: "x" } });
+
+  await step("convite: aceite cria membership com o cargo do convite e o token só vale uma vez", async () => {
+    const op = await newUser("op");
+    const { inviteUrl, emailSent } = await createInvitation(dbA, A, { email: op.email, role: "OPERATOR", baseUrl });
+    assert.equal(emailSent, false); // sem RESEND_API_KEY
+    const token = tokenOf(inviteUrl);
+    assert.equal((await getInvitationByToken(token)).status, "valid");
+    const stored = await prisma.invitation.findFirstOrThrow({ where: { email: op.email } });
+    assert.notEqual(stored.tokenHash, token); // só o hash é salvo
+    await acceptInvitation(token, op);
+    const m = await prisma.membership.findFirstOrThrow({ where: { userId: op.id, organizationId: A.organizationId } });
+    assert.equal(m.role, "OPERATOR");
+    assert.equal((await getInvitationByToken(token)).status, "accepted");
+    await assert.rejects(acceptInvitation(token, op), DomainError);
+  });
+
+  await step("convite: e-mail diferente do convite não pode aceitar", async () => {
+    const intruso = await newUser("intruso");
+    const { inviteUrl } = await createInvitation(dbA, A, { email: `alvo-${run}@test.local`, role: "FINANCIAL", baseUrl });
+    await assert.rejects(acceptInvitation(tokenOf(inviteUrl), intruso), /Este convite é para/);
+    assert.equal(await prisma.membership.count({ where: { userId: intruso.id } }), 0);
+  });
+
+  await step("convite: reenviar revoga o anterior; revogado e expirado não aceitam", async () => {
+    const fin = await newUser("fin");
+    const first = await createInvitation(dbA, A, { email: fin.email, role: "FINANCIAL", baseUrl });
+    const second = await createInvitation(dbA, A, { email: fin.email, role: "FINANCIAL", baseUrl });
+    assert.equal((await getInvitationByToken(tokenOf(first.inviteUrl))).status, "revoked");
+    await assert.rejects(acceptInvitation(tokenOf(first.inviteUrl), fin), DomainError);
+
+    await prisma.invitation.update({ where: { id: second.invitationId }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    assert.equal((await getInvitationByToken(tokenOf(second.inviteUrl))).status, "expired");
+    await assert.rejects(acceptInvitation(tokenOf(second.inviteUrl), fin), DomainError);
+
+    const third = await createInvitation(dbA, A, { email: fin.email, role: "FINANCIAL", baseUrl });
+    await revokeInvitation(dbA, A, third.invitationId);
+    await assert.rejects(acceptInvitation(tokenOf(third.inviteUrl), fin), DomainError);
+  });
+
+  await step("convite: ADMIN não convida ADMIN; ninguém convida OWNER; membro existente é recusado", async () => {
+    const adminCtx: OrgContext = { ...A, role: "ADMIN" };
+    await assert.rejects(createInvitation(dbA, adminCtx, { email: `x-${run}@t.local`, role: "ADMIN", baseUrl }), DomainError);
+    await assert.rejects(createInvitation(dbA, A, { email: `y-${run}@t.local`, role: "OWNER", baseUrl }), DomainError);
+    const owner = await prisma.user.findUniqueOrThrow({ where: { id: A.userId } });
+    await assert.rejects(createInvitation(dbA, A, { email: owner.email, role: "OPERATOR", baseUrl }), /já faz parte/);
+  });
+
+  await step("convite: limite do plano conta membros + convites pendentes", async () => {
+    await prisma.organization.update({ where: { id: B.organizationId }, data: { plan: "FREE" } }); // limite 1
+    await assert.rejects(
+      createInvitation(dbB, B, { email: `limite-${run}@t.local`, role: "OPERATOR", baseUrl }),
+      /Limite do plano/,
+    );
+  });
+
+  await step("membros: alterar cargo e remover respeitam hierarquia e tenant", async () => {
+    const op = await prisma.membership.findFirstOrThrow({ where: { organizationId: A.organizationId, role: "OPERATOR" } });
+    await changeMemberRole(A, op.id, "FINANCIAL");
+    assert.equal((await prisma.membership.findUniqueOrThrow({ where: { id: op.id } })).role, "FINANCIAL");
+
+    const ownerMembership = await prisma.membership.findFirstOrThrow({ where: { organizationId: A.organizationId, role: "OWNER" } });
+    await assert.rejects(removeMember(A, ownerMembership.id), DomainError); // não remove a si mesmo/OWNER
+    await assert.rejects(changeMemberRole({ ...A, role: "ADMIN", userId: "outro" }, ownerMembership.id, "OPERATOR"), DomainError);
+
+    // org B tentando remover membro da org A
+    await assert.rejects(removeMember(B, op.id), /Membro não encontrado/);
+    assert.ok(await prisma.membership.findUnique({ where: { id: op.id } }));
+
+    await removeMember(A, op.id);
+    assert.equal(await prisma.membership.findUnique({ where: { id: op.id } }), null);
+    const audit = await dbA.auditLog.findMany({ where: { entityId: op.id }, orderBy: { createdAt: "asc" } });
+    assert.deepEqual(audit.map((a) => a.action), ["ACCEPT_INVITE", "CHANGE_ROLE", "REMOVE"]);
   });
 
   console.log(`\n${passed} verificações passaram.`);

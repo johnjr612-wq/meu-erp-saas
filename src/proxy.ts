@@ -5,12 +5,15 @@ import { NextResponse, type NextRequest } from "next/server";
  * A verificação real (sessão válida + membership + RBAC) acontece no servidor,
  * em `requireOrgContext` (layouts/páginas) e em `createAction` (mutações).
  */
-const PUBLIC_PATHS = ["/", "/login", "/registro", "/precos"];
+const PUBLIC_PATHS = ["/", "/login", "/registro", "/recuperar-senha", "/precos"];
+const PUBLIC_PREFIXES = ["/convite/"];
 const SESSION_COOKIES = ["authjs.session-token", "__Secure-authjs.session-token"];
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  if (PUBLIC_PATHS.includes(pathname)) return NextResponse.next();
+  if (PUBLIC_PATHS.includes(pathname) || PUBLIC_PREFIXES.some((p) => pathname.startsWith(p))) {
+    return NextResponse.next();
+  }
 
   const hasSession = SESSION_COOKIES.some((name) => request.cookies.has(name));
   if (!hasSession) {

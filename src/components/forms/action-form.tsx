@@ -25,6 +25,7 @@ export function ActionForm({
   children,
   className,
   submitVariant,
+  confirmMessage,
 }: {
   action: (input: FormData) => Promise<ActionResult>;
   orgSlug: string;
@@ -33,6 +34,8 @@ export function ActionForm({
   children?: ReactNode;
   className?: string;
   submitVariant?: "default" | "outline" | "destructive" | "secondary";
+  /** Pede confirmação antes de enviar (ações destrutivas). */
+  confirmMessage?: string;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
   const [state, formAction] = useActionState<ActionResult | null, FormData>(
@@ -46,7 +49,14 @@ export function ActionForm({
 
   return (
     <FieldErrorsContext.Provider value={state && !state.ok ? (state.fieldErrors ?? {}) : {}}>
-      <form ref={formRef} action={formAction} className={cn("grid gap-3", className)}>
+      <form
+        ref={formRef}
+        action={formAction}
+        onSubmit={(e) => {
+          if (confirmMessage && !window.confirm(confirmMessage)) e.preventDefault();
+        }}
+        className={cn("grid gap-3", className)}
+      >
         <input type="hidden" name="orgSlug" value={orgSlug} />
         {hidden && Object.entries(hidden).map(([k, v]) => <input key={k} type="hidden" name={k} value={v} />)}
         {children}

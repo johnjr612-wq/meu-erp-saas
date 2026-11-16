@@ -9,7 +9,7 @@ import { prisma } from "@/lib/db";
 export type AuthFormState = { error?: string; fieldErrors?: Record<string, string[] | undefined> } | null;
 
 /** Slugs que colidem com rotas estáticas do app. */
-const RESERVED_SLUGS = new Set(["app", "api", "login", "registro", "recuperar-senha", "precos", "_next", "admin"]);
+const RESERVED_SLUGS = new Set(["app", "api", "login", "registro", "recuperar-senha", "precos", "convite", "_next", "admin"]);
 
 const registerSchema = z
   .object({
@@ -52,9 +52,7 @@ export async function registerAction(_prev: AuthFormState, formData: FormData): 
 }
 
 export async function loginAction(_prev: AuthFormState, formData: FormData): Promise<AuthFormState> {
-  const callbackUrl = String(formData.get("callbackUrl") ?? "");
-  // só aceita caminhos internos (evita open redirect)
-  const redirectTo = callbackUrl.startsWith("/") && !callbackUrl.startsWith("//") ? callbackUrl : "/app";
+  const redirectTo = safeInternalPath(formData.get("callbackUrl"), "/app");
   try {
     await signIn("credentials", {
       email: formData.get("email"),
@@ -68,6 +66,13 @@ export async function loginAction(_prev: AuthFormState, formData: FormData): Pro
   }
 }
 
-export async function logoutAction() {
-  await signOut({ redirectTo: "/login" });
+/** Só caminhos internos (evita open redirect). */
+function safeInternalPath(value: unknown, fallback: string): string {
+  const path = typeof value === "string" ? value : "";
+  return path.startsWith("/") && !path.startsWith("//") ? path : fallback;
+}
+
+export async function logoutAction(formData?: FormData) {
+  const next = safeInternalPath(formData?.get("next"), "");
+  await signOut({ redirectTo: next ? `/login?callbackUrl=${encodeURIComponent(next)}` : "/login" });
 }
